@@ -6,6 +6,7 @@ disable = [
   'depguard',
   'exhaustive',
   'exhaustruct',
+  'exhaustruct_v5',
   'godox',
   'gomodguard',
   'ireturn',
@@ -65,7 +66,7 @@ path = '^(cmd/[^/]+/)?[^/]+\.go$'
 default = 'warn'
 
 [[severity.rules]]
-linters = ['exhaustive', 'exhaustruct', 'godox']
+linters = ['exhaustive', 'exhaustruct', 'exhaustruct_v5', 'godox']
 severity = 'info'
 
 [formatters]

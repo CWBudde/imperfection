@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -64,7 +65,7 @@ type passSources struct {
 func (p *passSources) files() []string {
 	files := p.image.files
 	if p.bufferA != nil {
-		files = append(files[:len(files):len(files)], p.bufferA.files...)
+		files = append(slices.Clip(files), p.bufferA.files...)
 	}
 
 	return files

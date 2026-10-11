@@ -4,6 +4,9 @@ A GLSL recreation of an abstract painting where a warm yellow, orange and red gl
 the left breaks up into rectangular brush blocks and vertical streaks, then fades
 into dark blue on the right.
 
+**▶ [Try it online](https://meko-christian.github.io/imperfection/)**: runs in any
+browser with WebGL2 (`Space` pauses, `F` toggles fullscreen).
+
 The scene is written in Shadertoy form (`mainImage`) and split into include files.
 A small Go runner (go-gl 4.1 core + GLFW 3.3, taken from `the-other-side`) renders it
 in a window with hot reload. It can also render deterministic screenshots and
@@ -31,6 +34,8 @@ paste into Shadertoy.
 | `main.go`, `render.go`, `pipeline.go`, `preprocess.go`, `compare.go` | the runner (`pipeline.go`: multipass)                                                            |
 | `cmd/imgstat/`                                                       | image analysis and style scoring tool                                                            |
 | `docs/reference-stats.txt`                                           | `imgstat analyze` of the reference                                                               |
+| `web/`                                                               | WebGL2 player for the bundled passes (GitHub Pages)                                              |
+| `.github/workflows/pages.yml`                                        | bundles the shaders and publishes `web/` to GitHub Pages                                         |
 | `out/`                                                               | render output (git-ignored)                                                                      |
 
 The painting renders in two passes. Buffer A (`paint.glsl`) paints L0-L2 crisp,
@@ -135,6 +140,7 @@ that as its check. Keep the two files next to each other.
 | `just sheet [dir] [every] [grid] [crop] [width] [out]` | contact sheet of every n-th frame, for judging motion                     |
 | `just bench [dur] [args]`                              | benchmark at 1024x1024 and 2048x2048                                      |
 | `just bundle [args]`                                   | write `out/shadertoy.glsl` (+ `_bufferA`) and render it back as a check   |
+| `just web [port] [args]`                               | bundle into `out/web` with the WebGL2 player and serve it on `:8000`      |
 | `just stat [img]`                                      | `imgstat analyze` (default: the reference)                                |
 | `just stat-ref`                                        | regenerate `docs/reference-stats.txt`                                     |
 | `just score [renders...]`                              | `imgstat score` against the reference (default: `out/shot.png`)           |
@@ -144,6 +150,18 @@ that as its check. Keep the two files next to each other.
 | `just lint` / `just lint-fix`                          | golangci-lint with `.golangci.toml`                                       |
 | `just fix`                                             | `lint-fix`, then `fmt`                                                    |
 | `just check`                                           | formatted, lint, `go mod tidy -diff`, build and vet                       |
+
+## Web version
+
+Live at <https://meko-christian.github.io/imperfection/>. On every push to `main`,
+the Pages workflow bundles the shaders and publishes them with the small WebGL2 player
+in `web/`, which runs the same two passes as the Go runner (Buffer A in a half-float
+texture, then the Image pass). It needs `EXT_color_buffer_float`, because the Buffer A
+alpha packs integers that an 8-bit target would destroy. The canvas is the largest
+centred square that fits the window. It renders at most 1080 lines and lowers the
+resolution further when frames take longer than about 45 ms. `?scale=0.5` fixes the
+render scale, `?t=20` sets the start time. Keys: `Space` pauses, `F` or a double click
+toggles fullscreen. `just web` builds and serves the same site locally.
 
 ## Image statistics: `cmd/imgstat`
 
