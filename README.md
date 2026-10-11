@@ -1,8 +1,8 @@
 # Imperfection
 
-A GLSL recreation of `reference/reference.png`: an abstract painting where a warm
-yellow, orange and red glow on the left breaks up into rectangular brush blocks and
-vertical streaks, then fades into dark blue on the right.
+A GLSL recreation of an abstract painting where a warm yellow, orange and red glow on
+the left breaks up into rectangular brush blocks and vertical streaks, then fades
+into dark blue on the right.
 
 The scene is written in Shadertoy form (`mainImage`) and split into include files.
 A small Go runner (go-gl 4.1 core + GLFW 3.3, taken from `the-other-side`) renders it

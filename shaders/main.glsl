@@ -36,6 +36,12 @@
 #ifndef EXPOSURE
 #define EXPOSURE 1.0
 #endif
+// 1 = clip to the square painting with black bars on non-square canvases
+// (Shadertoy's 16:9 preview), 0 = let the field continue beyond the square.
+// Buffer A still paints the margin, so the smear near the edge reads paint.
+#ifndef CLIP_SQUARE
+#define CLIP_SQUARE 1
+#endif
 
 #include "common.glsl"
 #include "anim.glsl"
@@ -45,7 +51,13 @@
 #include "grade.glsl"
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
-    vec2 uv = fragCoord / iResolution.xy;
+    vec2 uv = canvasUV(fragCoord);
+#if CLIP_SQUARE
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+#endif
     vec2 P = uv * REF_SIZE;     // reference pixels
 
 #ifdef SHOW_FIELD

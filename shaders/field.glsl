@@ -328,6 +328,13 @@ vec4 baseField(vec2 p) { return baseField(p, 0.5); }
 // All lengths are in reference pixels (the reference is 1024 px wide), so the
 // image keeps its look at other render sizes.
 const float REF_SIZE    = 1024.0;
+
+// The painting is square. On other canvases (Shadertoy's 16:9 preview,
+// fullscreen) it keeps its proportions - 45 deg stays 45 deg - and fills
+// the canvas: the square spans the shorter side, centred, and the field
+// simply continues beyond it on the longer side.
+float canvasSide() { return min(iResolution.x, iResolution.y); }
+vec2 canvasUV(vec2 fc) { return (fc - 0.5 * (iResolution.xy - canvasSide())) / canvasSide(); }
 const float LUM_SPREAD  = 0.10;      // per-streak brightness variation
 const float DARK_LINES  = 0.04;      // fraction of streak segments that are dark scratches
 

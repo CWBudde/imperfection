@@ -143,7 +143,7 @@ vec3 layerWet(vec2 fc) {
 #endif
 
     vec2 res = iResolution.xy;
-    float sc = res.y / REF_SIZE;          // px per reference px
+    float sc = canvasSide() / REF_SIZE;          // px per reference px
     vec2 d = wetDir(m.x);
     vec2 n = vec2(-d.y, d.x);
 
@@ -158,7 +158,7 @@ vec3 layerWet(vec2 fc) {
     vec3 cc = c0.rgb;
     // the lower warm column keeps the reference's crisp 1 px hairlines: its
     // vertical paint is softened along the grain, hardly across it
-    float crisp = CRISP * box(fc / res, vec2(0.19, -0.1), vec2(0.49, 0.42), 0.03) * step(1.5, m.x) * step(m.x, 2.5);
+    float crisp = CRISP * box(canvasUV(fc), vec2(0.19, -0.1), vec2(0.49, 0.42), 0.03) * step(1.5, m.x) * step(m.x, 2.5);
 #if AA_EDGE
     float ln = floor(dot(fc, n));
     float hl = hash11(ln * 0.618 + m.x * 7.1);
@@ -166,7 +166,7 @@ vec3 layerWet(vec2 fc) {
     vec2 j = (d * hj.x + n * hj.y * (1.0 - crisp)) * AA_JIT;
     // tent along the grain diagonal (crisp: along the grain only)
     vec2 e = mix(0.5 * vec2(1.0, sign(d.x * d.y + 0.5 * d.y)), 0.5 * d, crisp);
-    cc = 0.5 * (texture(iChannel0, (fc + j + e) / res).rgb + texture(iChannel0, (fc + j - e) / res).rgb);
+    cc = 0.5 * (textureLod(iChannel0, (fc + j + e) / res, 0.0).rgb + textureLod(iChannel0, (fc + j - e) / res, 0.0).rgb);
     if (wet <= 0.0) return cc;
 #endif
 
@@ -210,7 +210,7 @@ vec3 layerWet(vec2 fc) {
 #else
         vec2 o = d * sk + n * cj;
 #endif
-        vec3 c = texture(iChannel0, (fc + o) / res).rgb;
+        vec3 c = textureLod(iChannel0, (fc + o) / res, 0.0).rgb;
         vec3 r = sqrt(max(c, 0.0));
         vec3 dc = r - r0;
         // close taps soften any edge (no stair steps), far taps only blend

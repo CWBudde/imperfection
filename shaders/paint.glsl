@@ -21,7 +21,7 @@
 #include "blocks.glsl"
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
-    vec2 uv = fragCoord / iResolution.xy;
+    vec2 uv = canvasUV(fragCoord);
     vec2 P = uv * REF_SIZE;     // reference pixels
 
 #ifdef SHOW_FIELD
@@ -32,9 +32,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     // L1 + L2: the smeared background and the blocks (blocks.glsl)
     vec4 col = layerPaint(uv, P);
-    // the wetness map gets a fresh copy of uv (the max is a no-op, uv >= 0):
+    // the wetness map gets a fresh copy of uv (the max is a no-op, uv > -8 even on wide canvases):
     // otherwise the compiler shares its zone terms with the paint layers and
     // keeps them live across L1 + L2 (register pressure, SIMD16)
-    uv = max(uv, vec2(-1.0));
+    uv = max(uv, vec2(-8.0));
     fragColor = vec4(col.rgb, wetPack(col.a, wetness(uv, col.a)));
 }
