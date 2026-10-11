@@ -4,7 +4,7 @@ A GLSL recreation of an abstract painting where a warm yellow, orange and red gl
 the left breaks up into rectangular brush blocks and vertical streaks, then fades
 into dark blue on the right.
 
-**▶ [Try it online](https://meko-christian.github.io/imperfection/)**: runs in any
+**▶ [Try it online](https://cwbudde.github.io/imperfection/)**: runs in any
 browser with WebGL2 (`Space` pauses, `F` toggles fullscreen).
 
 The scene is written in Shadertoy form (`mainImage`) and split into include files.
@@ -153,7 +153,7 @@ that as its check. Keep the two files next to each other.
 
 ## Web version
 
-Live at <https://meko-christian.github.io/imperfection/>. On every push to `main`,
+Live at <https://cwbudde.github.io/imperfection/>. On every push to `main`,
 the Pages workflow bundles the shaders and publishes them with the small WebGL2 player
 in `web/`, which runs the same two passes as the Go runner (Buffer A in a half-float
 texture, then the Image pass). It needs `EXT_color_buffer_float`, because the Buffer A
