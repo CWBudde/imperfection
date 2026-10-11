@@ -12,11 +12,11 @@ they are.
 `shaders/anim.glsl` is the only source of time. Do not use raw `iTime` in
 layers.
 
-| helper                       | use                                                                  |
-| ---------------------------- | -------------------------------------------------------------------- |
-| `loopPhase()`                | phase 0..1 of the seamless loop (`LOOP = 32 s`)                      |
-| `loopScroll(cycles, period)` | flowing paint; travels a whole number of pattern periods per loop    |
-| `loopNoise(seed, cycles)`    | smooth periodic wobble in −1..1 (flicker, breathing)                 |
+| helper                       | use                                                                          |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| `loopPhase()`                | phase 0..1 of the seamless loop (`LOOP = 32 s`)                              |
+| `loopScroll(cycles, period)` | flowing paint; travels a whole number of pattern periods per loop            |
+| `loopNoise(seed, cycles)`    | smooth periodic wobble in −1..1 (flicker, breathing)                         |
 | `loopEvent(slots, seed)`     | discrete events: (slot id, progress 0..1); a new hash per slot = a new event |
 
 Two requirements follow from this:
@@ -33,12 +33,13 @@ Two requirements follow from this:
 All motion runs along the fundamental directions only: 0°, 45°, 90° and 135°.
 This holds for drift, wipes and growth as well as for strokes.
 
-| layer           | motion                                                                                                                                                                                                                                                                                                                                                                                       |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| L0 field, light | The warm/cool seam breathes (threshold wobble, bounded to about ±0.02 uv). The yellow core flickers like a low fire, slowly (2–6 cycles per loop) and by at most about ±12 % luminance, plus a faster, smaller shimmer. The anchor colours drift a little in hue and lightness. Nothing moves its position by more than about 0.015 uv.                                                    |
-| L1 smear        | **Paint flows.** Vertical drips run downward at about 10–60 px/s, with a different speed per strand (an integer number of cycles per loop). Horizontal smears in the band drag rightward. Diagonal strands slide along their own direction. A pixel sees colour flowing past it, not the whole layer translating. |
-| L2 blocks       | **The collage reassembles.** Random grid blocks have a life cycle per event slot: they wipe in along their grain (like a pixel-sort sweep), hold, then wipe or fade out, and the next slot brings a new block. A few blocks glitch-slide by quantized steps along 0° or 90°. The authored hero blocks stay, because they carry the composition, but get occasional re-sort sweeps through their grain.  |
-| L3 accents      | Ink scratches are **drawn**: they grow along their length, hold, then fade. The soot strip drifts sideways. The wedge edge frays and breathes. The red specks are replaced (see the accents brief).                                                                                                                                                                                                    |
+| layer           | motion                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L0 field, light | The warm/cool seam breathes (threshold wobble, bounded to about ±0.02 uv). The yellow core flickers like a low fire, slowly (2–6 cycles per loop) and by at most about ±12 % luminance, plus a faster, smaller shimmer. The anchor colours drift a little in hue and lightness. Nothing moves its position by more than about 0.015 uv.                                                                                                                          |
+| L1 smear        | **Paint flows.** Vertical drips run downward at about 10–60 px/s, with a different speed per strand (an integer number of cycles per loop). Horizontal smears in the band drag rightward. Diagonal strands slide along their own direction. A pixel sees colour flowing past it, not the whole layer translating.                                                                                                                                                |
+| L2 blocks       | **The collage reassembles.** Random grid blocks have a life cycle per event slot: they wipe in along their grain (like a pixel-sort sweep), hold, then wipe or fade out, and the next slot brings a new block. A few blocks glitch-slide by quantized steps along 0° or 90°. The authored hero blocks stay, because they carry the composition, but get occasional re-sort sweeps through their grain. The sweeps stay inside the hero's rectangular silhouette. |
+| W wet smear     | **Wet runs drag.** The run length of every brush strand in the post pass breathes (2 cycles per loop, ±30 %), so wet areas slowly bleed further and relax. Direction and wetness come from the paint pass, so the smear follows the flowing paint and the reassembling blocks.                                                                                                                                                                                   |
+| L3 accents      | Ink scratches are **drawn**: they grow along their length, hold, then fade. The soot strip drifts sideways. The wedge's 45° brush strokes slide along their lanes at 1–2 lane periods per loop, and its edge breathes across; its stepped outline is fixed on the canvas. Red drips run out of the band, slow down, hold and dry; some end in a bead, some taper out. Red dry-brush dabs are dabbed in left to right in clusters, ride the soot drift and fade.  |
 
 The rhythm should be calm overall, with a few accents: about 1–3 noticeable
 events per second across the whole frame, with no strobing and no full-frame

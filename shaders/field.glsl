@@ -90,7 +90,7 @@ const vec3 COOL_POS[N_COOL] = vec3[](
     vec3(0.53, 0.55, 0.7),                                               // dusky purple at the seam
     vec3(0.80, 0.53, 0.8), vec3(0.10, 0.16, 0.9),                        // ink above the band, grey drip
     vec3(0.92, 0.12, 0.6), vec3(0.47, 0.04, 0.6),                        // ink pools at the bottom
-    vec3(0.53, 0.12, 0.45), vec3(0.88, 0.05, 0.45), vec3(0.66, 0.06, 0.4) // lighter blue drips, bottom
+    vec3(0.53, 0.12, 0.45), vec3(0.88, 0.05, 0.5), vec3(0.66, 0.06, 0.4) // lighter blue drips, bottom
 );
 const vec3 COOL_COL[N_COOL] = vec3[](
     HX(0x8a7e98),
@@ -114,7 +114,7 @@ const vec3 COOL_COL[N_COOL] = vec3[](
     HX(0x30303e),
     HX(0x0a0810), HX(0x5a6a78),
     HX(0x02060c), HX(0x040a14),
-    HX(0x1e4a6e), HX(0x2a5878), HX(0x184266)
+    HX(0x1e4a6e), HX(0x30628a), HX(0x184266)
 );
 
 // ---- explicit rectangles painted into the field -----------------------------
@@ -124,6 +124,15 @@ const vec3 COOL_COL[N_COOL] = vec3[](
 // are glazes that only exist in L2.
 const int N_RECT = 11;
 const int N_FIELD_RECT = 9;
+// The background smear does not drag some rectangles (bit i set = rectangle
+// i skipped): the coral block (0), where the 45 deg smear dragged its paint
+// out in every direction and turned the hero into a hairy pink blob whenever
+// the grid blocks around it wiped out, and the two slate blocks (5, 6),
+// whose paint was dragged sideways and down into stairs. Grid blocks near
+// them do not pick it up either (frayed pink combs). The heroes (L2) still
+// paint them, as clean rectangles.
+const int BG_SKIP = (1 << 0) | (1 << 5) | (1 << 6);
+const float FIELD_BG = 2.0;     // baseField: thr offset that marks the background lookup
 const vec4 RECT_BOX[N_RECT] = vec4[](
     vec4(0.68, 0.45, 0.78, 0.53),  // coral pink block in the band
     vec4(0.78, 0.40, 0.94, 0.456), // crimson block, right
@@ -138,14 +147,14 @@ const vec4 RECT_BOX[N_RECT] = vec4[](
     vec4(0.812, 0.66, 0.966, 0.906)  // glaze: steel-blue bar, upper right
 );
 const vec3 RECT_COL[N_RECT] = vec3[](
-    HX(0xb04248), HX(0x9a1a26), HX(0x8a1820), HX(0x2a0c18), HX(0xf0b048),
-    HX(0x14243a), HX(0x2a4c66), HX(0xc4563e), HX(0x5a2026),
+    HX(0xbe423c), HX(0x9a1a26), HX(0x8a1820), HX(0x2a0c18), HX(0xf0b048),
+    HX(0x1a3450), HX(0x36607e), HX(0xc4563e), HX(0x5a2026),
     HX(0x4a4440), HX(0x1a3e5a)
 );
 const float RECT_WARM[N_RECT] = float[](1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0);
 // grain contrast and grain angle of each rectangle when it is redrawn as a
 // crisp block (L2); angles are 0, 45, 90 or 135 deg only
-const float RECT_GRAIN[N_RECT] = float[](0.20, 0.10, 0.10, 0.45, 0.08, 0.10, 0.10, 0.20, 0.12, 0.45, 0.16);
+const float RECT_GRAIN[N_RECT] = float[](0.38, 0.10, 0.10, 0.45, 0.08, 0.10, 0.10, 0.20, 0.12, 0.45, 0.16);
 const float RECT_ANG[N_RECT] = float[](0.25 * PI, 0.0, 0.5 * PI, 0.5 * PI, 0.0, 0.0, 0.0, 0.75 * PI, 0.0,
                                        0.5 * PI, 0.5 * PI);
 
@@ -200,10 +209,10 @@ const vec2  WVAR_FREQ_L = vec2(21.0, 4.2);  // lightness cells
 // cool threads: narrow runs inside the lower orange column where the warmth
 // dips below the switch, so blue drips run through the orange
 #ifndef COOL_THREADS
-#define COOL_THREADS 0.45
+#define COOL_THREADS 0.62
 #endif
 #ifndef COOL_THREAD_CUT
-#define COOL_THREAD_CUT 0.62 // noise level above which a cool thread starts
+#define COOL_THREAD_CUT 0.66 // noise level above which a cool thread starts
 #endif
 
 // Seam breathing, colour drift (animation, all amplitudes x ANIM). The Shepard weights are read at a displaced point, so the
@@ -238,8 +247,12 @@ vec3 warmShift(vec3 c, float dh, float f) {
 
 // Base colour field. p in uv, thr = warmth at which the family switches
 // (0.5 neutral; the smear dithers it per hairline, so a seam turns into
-// interleaved threads). Returns vec4(linear rgb, warmth).
+// interleaved threads). thr + FIELD_BG: the lookup of the background and the
+// grid blocks, which do not see the rectangles in BG_SKIP. Returns
+// vec4(linear rgb, warmth).
 vec4 baseField(vec2 p, float thr) {
+    bool bg = thr > 1.5;
+    thr = bg ? thr - FIELD_BG : thr;
     // animation: smooth, spatially varying displacement of the anchor lookup
     // (two standing sines, 2 and 3 cycles per loop, whose sign and size vary
     // with a slow 1D noise of the position, so the seams breathe in and out
@@ -272,8 +285,11 @@ vec4 baseField(vec2 p, float thr) {
     // cool threads through the lower column
     float lowCol = box(p, vec2(0.21, 0.0), vec2(0.47, 0.42), 0.04);
     if (lowCol > 0.0) {
-        float tn = noise(p * vec2(60.0, 1.8) + vec2(3.3, 0.0));
-        warmth -= COOL_THREADS * lowCol * smoothstep(COOL_THREAD_CUT, COOL_THREAD_CUT + 0.23, tn);
+        // cells ~7 px wide and ~0.9 uv tall: once smeared, long thin threads
+        // (1-3 px), not short blobs; a steep ramp, so a thread is either cool
+        // or warm and the hairline dither does not chop it into dashes
+        float tn = noise(p * vec2(150.0, 1.1) + vec2(3.3, 0.0));
+        warmth -= COOL_THREADS * lowCol * smoothstep(COOL_THREAD_CUT, COOL_THREAD_CUT + 0.1, tn);
     }
 
     // hard family switch (tiny AA width only)
@@ -298,7 +314,7 @@ vec4 baseField(vec2 p, float thr) {
 
     for (int i = 0; i < N_FIELD_RECT; i++) {
         vec4 b = RECT_BOX[i];
-        if (all(greaterThan(p, b.xy)) && all(lessThan(p, b.zw))) {
+        if ((!bg || ((BG_SKIP >> i) & 1) == 0) && all(greaterThan(p, b.xy)) && all(lessThan(p, b.zw))) {
             col = RECT_COL[i];
             warmth = RECT_WARM[i];
         }
@@ -341,7 +357,7 @@ void directionField(vec2 uv, out float ang, out vec2 len, out float spread, out 
     // bottom right corner
     float hor = box(uv, vec2(0.74, 0.30), vec2(1.1, 0.60), 0.03);
     hor = max(hor, box(uv, vec2(0.48, 0.24), vec2(1.1, 0.40), 0.02));
-    hor = max(hor, box(uv, vec2(-0.1, 0.36), vec2(0.21, 0.46), 0.01));
+    hor = max(hor, box(uv, vec2(-0.1, 0.36), vec2(0.185, 0.46), 0.01));
     hor = max(hor, 0.8 * box(uv, vec2(0.80, 0.11), vec2(1.1, 0.28), 0.03));
 
     // horizontal drag from the LEFT: the column's orange is pulled into the
@@ -362,7 +378,8 @@ void directionField(vec2 uv, out float ang, out vec2 len, out float spread, out 
     // grainier in the dark right half and the top-left hatching
     float gain = 1.0 - 0.65 * box(uv, vec2(0.12, 0.55), vec2(0.60, 1.1), 0.05);
     gain += 0.6 * box(uv, vec2(0.72, -0.1), vec2(1.1, 1.1), 0.06);
-    gain += 0.6 * box(uv, vec2(0.50, -0.1), vec2(1.1, 0.25), 0.05);
+    gain += 1.0 * box(uv, vec2(0.50, -0.1), vec2(1.1, 0.25), 0.05);   // navy bottom: light and dark drips
+    gain += 0.5 * box(uv, vec2(0.20, -0.1), vec2(0.48, 0.38), 0.04);   // lower column: hairline contrast
     spread *= gain;
 
     if (hor > nz) {
@@ -396,7 +413,7 @@ float blockDensity(vec2 uv) {
     d = max(d, 0.70 * box(uv, vec2(0.60, 0.60), vec2(0.88, 1.00), 0.05));
     d *= 1.0 - 0.6 * box(uv, vec2(0.40, 0.62), vec2(0.58, 1.1), 0.02); // ice column: drips, few blocks
     d *= 1.0 - 0.8 * box(uv, vec2(0.47, 0.34), vec2(0.72, 0.43), 0.01); // keep the orange drag visible
-    d = max(d, 0.35 * box(uv, vec2(0.00, 0.33), vec2(0.22, 0.47), 0.03));
+    d = max(d, 0.20 * box(uv, vec2(0.00, 0.33), vec2(0.22, 0.47), 0.03));   // slate blocks: calm, the heroes carry them
     // bottom left is drips, not blocks
     d *= 1.0 - 0.9 * box(uv, vec2(-0.1, -0.1), vec2(0.24, 0.335), 0.02);
     return d;

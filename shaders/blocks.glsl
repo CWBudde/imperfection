@@ -19,10 +19,12 @@
 // authored hero blocks stay in place and get occasional re-sort sweeps
 // through their grain.
 //
-// Performance note: the Intel compiler drops to SIMD8 (about 2x slower) when
-// register pressure gets too high. So no dynamic vector indexing, the hero
-// paint is evaluated at most twice per pixel, and everything but the field
-// lookup is settled before it. Check with INTEL_DEBUG=fs for "SIMD16 shader".
+// Performance note: the Intel compiler drops to SIMD8 (1.5-2x slower)
+// when register pressure gets too high. So no dynamic vector indexing, the
+// smear + field lookup is inlined only three times (background, grid loop,
+// hero; smear.glsl: paintJob), the hero paint is evaluated at most twice per
+// pixel, and everything but the field lookup is settled before it. Check
+// with INTEL_DEBUG=fs for "SIMD16 shader".
 // Debug: -D BLOCK_DEBUG=1 shows living blocks green, wipes magenta, slides
 // cyan and hero sweeps yellow.
 
@@ -54,11 +56,12 @@ const float SLIDE_DUR   = 0.05;   // duration of a slide (fraction of a slot)
 const float HERO_SLOTS  = 2.0;    // re-sort sweep slots per loop of a hero block
 const float HERO_P      = 0.75;   // chance that a hero slot carries a sweep
 const float SWEEP_DUR   = 0.10;   // duration of a hero sweep (fraction of a slot)
-const float HERO_FRAY   = 1.3;    // hero blocks fray a little more than grid blocks
+const float HERO_FRAY   = 0.45;   // hero hairline ends: short and mostly inside the silhouette (x FRAY_PX)
+const float HERO_GLOW   = 0.20;   // brightness lift of a hero's sorted band (calmer than SORT_GLOW)
 const float HERO_STREAK = 0.8;    // long brush streaks in hero blocks, relative to their grain
 
 // glaze bars (the authored glazes in the upper right)
-const vec2  BAR_RUN     = vec2(120.0, 520.0); // run length of one barcode line tone (px)
+const vec2  BAR_RUN     = vec2(30.0, 180.0);  // run length of one barcode line tone (px)
 const float BAR_UMBER   = 0.08;   // share of umber threads in the grey bar
 const vec3  UMBER       = vec3(0.36, 0.25, 0.17); // sRGB umber thread colour
 const vec3  BAR_TINT    = vec3(0.70, 1.00, 1.35); // grey bar: the reference reads steel grey, not warm grey
@@ -79,12 +82,6 @@ vec2 driftAt(vec2 P, vec2 d, float seed) {
     return vec2(1.0 + 2.0 * BLK_DRIFT_LUM * x, BLK_DRIFT_HUE * y);
 }
 
-// Apply a streak brightness lum and the drift dr (from driftAt) to paint c.
-vec3 paintShade(vec3 c, float lum, vec2 dr) {
-    c = shade(c, lum * dr.x);
-    return c * vec3(1.0, 1.0 + 2.0 * dr.y, 1.0 + dr.y * (c.b > c.r ? 1.0 : -1.0));
-}
-
 // Ragged hairline end: how far this hairline's end sits beyond (> 0) or
 // short of (< 0) the block edge, in px.
 float frayPx(float line, float seed) {
@@ -99,38 +96,15 @@ float wipeFront(float pr, float line, float seed) {
     return pr * (1.0 + RAG) - RAG * hash12(vec2(line, seed * 5.3 + 0.7));
 }
 
-// A block's paint, settled up to the two expensive lookups. Grid blocks and
-// the hero block only differ in these parameters, so layerBlocks runs the
-// smear and the field lookup at a single call site for all of them (GLSL
-// inlines every call; one copy keeps the shader small enough for SIMD16).
-struct BlockPaint {
-    vec2  P;       // smear position (reference px)
-    float ang;     // grain angle
-    vec2  len;     // smear segment length range (px)
-    float spread;  // streak contrast
-    float dark;    // share of dark scratches
-    float seed;    // smear seed
-    vec2  p0;      // field lookup: p0 + (sm.q - P * qSub) / REF_SIZE * qScale
-    float qSub;
-    float qScale;
-    float lumF;    // brightness factor on top of the smear brightness
-    float lumPow;  // exponent on the smear brightness (1 = as is)
-    vec2  dr;      // colour drift (driftAt)
-    float cover;   // coverage: 1 opaque, < 1 glaze opacity over its own family
-    float warm;    // family of the block; < 0: the family of its field paint
-#ifdef BLOCK_DEBUG
-    vec4  dbg;     // debug colour, shown where .a > 0
-#endif
-};
-
 // ---- grid blocks ---------------------------------------------------------------
 
 // One jittered grid of rectangles. Each cell may hold one axis-aligned block
 // covering a random sub-rectangle of the cell. Inside, the lookup collapses to
 // one field point (the block's paint), with a compressed smear for grain.
-// Returns false where the cell has no block at this pixel, else fills bp
-// (the paint is looked up in layerBlocks).
-bool blockGrid(vec2 uv, vec2 P, vec2 cell, vec2 offs, float seed, out BlockPaint bp) {
+// Returns false where the cell has no block at this pixel, else fills the
+// block's paint job bp (run by layerPaint).
+bool blockGrid(vec2 uv, vec2 P, vec2 cell, vec2 offs, float seed, out PaintJob bp) {
+    bp = noJob();
     vec2 g = (uv + offs) / cell;
     vec2 id = floor(g);
     vec2 f = fract(g);
@@ -170,7 +144,7 @@ bool blockGrid(vec2 uv, vec2 P, vec2 cell, vec2 offs, float seed, out BlockPaint
     // grain: horizontal in the band and the slate blocks, else mostly vertical
     float horP = 0.50 * box(c, vec2(0.48, 0.33), vec2(1.0, 0.60), 0.02)
                       + 0.40 * box(c, vec2(0.72, 0.33), vec2(1.0, 0.52), 0.02)
-                      + 0.70 * box(c, vec2(0.0, 0.33), vec2(0.22, 0.47), 0.02)
+                      + 0.35 * box(c, vec2(0.0, 0.33), vec2(0.22, 0.47), 0.02)
                       + 0.25 * box(c, vec2(0.1, 0.40), vec2(0.5, 0.62), 0.02);
     bool hor = fract(hh * 13.7) < horP;
     float ang = hor ? ANG_H : ANG_V;
@@ -276,13 +250,9 @@ bool blockGrid(vec2 uv, vec2 P, vec2 cell, vec2 offs, float seed, out BlockPaint
     bp.dark = DARK_LINES;
     bp.seed = seed + 11.0;
     bp.p0 = p0;
-    bp.qSub = 0.0;
-    bp.qScale = 0.6;
-    bp.lumF = lumF;
-    bp.lumPow = 1.0;
-    bp.dr = dr;
-    bp.cover = ga;
-    bp.warm = -1.0;
+    bp.lumK = lumF * dr.x;
+    bp.tilt = dr.y;
+    bp.cover = ga + 4.0 * dirIndex(ang);   // + grain direction, see PaintJob.cover
 #ifdef BLOCK_DEBUG
     // debug: living blocks in green, transitions in magenta, slides in cyan
     bp.dbg = vec4(0.0);
@@ -315,12 +285,14 @@ vec4 barcode(vec2 P, vec2 d, float seed, float contrast) {
     return vec4(lum, clamp(a, 0.0, 2.6), hl.y, 0.0);
 }
 
-// Hit test of hero rectangle i with frayed ends: hairline ends are shifted
-// along the grain (on diagonal grain that frays every edge at 45/135 deg),
-// and break up like a dry brush at the downstream end. Returns the position
-// along the grain (0..1), or -1 outside.
+// Hit test of hero rectangle i. Hero blocks carry the composition, so they
+// keep a readable rectangular silhouette: hairline ends only scatter by a
+// few px, mostly short of the edge (no bleeding hairlines, which on
+// diagonal grain turned every edge hairy), and the dry-brush break-up at the
+// downstream end stays inside. The wet pass softens the edges to 1-2 px.
+// Returns the position along the grain (0..1), or -1 outside.
 float heroHit(int i, vec2 uv, vec2 P) {
-    const float M = HERO_FRAY * (FRAY_PX + BLEED_PX) / REF_SIZE;
+    const float M = 2.0 / REF_SIZE;
     vec4 r = RECT_BOX[i];
     if (any(lessThan(uv, r.xy - M)) || any(greaterThan(uv, r.zw + M))) return -1.0;
     float fi = float(i);
@@ -328,13 +300,13 @@ float heroHit(int i, vec2 uv, vec2 P) {
     vec2 c = 0.5 * (r.xy + r.zw);
     float line = floor(dot(P, vec2(-d.y, d.x)) / LINE_PX);
     float s = dot(uv - c, d);
-    float j = HERO_FRAY * frayPx(line, fi * 7.3 + (s > 0.0 ? 41.0 : 43.0)) / REF_SIZE;
+    float j = HERO_FRAY * FRAY_PX * (hash12(vec2(line * 0.37 + fi, s > 0.0 ? 41.0 : 43.0)) - 0.75) / REF_SIZE;
     vec2 q = uv - d * sign(s) * j;
     if (any(lessThan(q, r.xy)) || any(greaterThan(q, r.zw))) return -1.0;
     vec2 hs = 0.5 * (r.zw - r.xy);
     float u = 0.5 + 0.5 * s / (abs(d.x) * hs.x + abs(d.y) * hs.y);
     float dash = hash12(vec2(line * 1.3 + fi, floor(dot(P, d) / mix(6.0, 26.0, hash11(line + fi)))));
-    return dash < DRY_END * 0.7 * smoothstep(0.85, 1.0, u) ? -1.0 : u;
+    return dash < DRY_END * 0.4 * smoothstep(0.88, 1.0, u) ? -1.0 : u;
 }
 
 // Re-sort sweep through hero rectangle i at a pixel heroHit accepted (u
@@ -361,29 +333,29 @@ vec3 heroSweep(int i, float u, vec2 P) {
 // rectangle's own paint, plus its grain and long brush streaks. (Inside the
 // rectangle the field returns the rectangle's colour, the topmost field
 // rectangle winning, so the plain field lookup is the rectangle's paint.)
-BlockPaint heroPaint(int i, float u, vec2 P) {
+PaintJob heroPaint(int i, float u, vec2 P) {
     vec3 sw = heroSweep(i, u, P);
     vec2 Pq = sw.xy;
     float fi = float(i);
     vec4 r = RECT_BOX[i];
     float ang = RECT_ANG[i];
     vec2 d = vec2(cos(ang), sin(ang));
-    BlockPaint bp;
+    PaintJob bp = noJob();
     bp.P = Pq;
     bp.ang = ang;
     bp.len = vec2(40.0, 300.0);
     bp.spread = RECT_GRAIN[i];
     bp.dark = 0.08;
     bp.seed = 23.0 + fi;
-    bp.p0 = 0.5 * (r.xy + r.zw) * 0.7 + Pq / REF_SIZE * 0.3;
-    bp.qSub = 1.0;
-    bp.qScale = 0.25;
+    // the lookup stays near the rectangle's centre, so it does not wander
+    // into a neighbouring or overlapping rectangle (stripes of foreign paint)
+    bp.p0 = 0.5 * (r.xy + r.zw) * 0.85 + Pq / REF_SIZE * 0.15;
     // the smear grain alone reads mottled on a flat rectangle: add streaks
-    bp.lumF = barcode(Pq, d, fi + 0.5, RECT_GRAIN[i] * HERO_STREAK).x * (1.0 + SORT_GLOW * sw.z);
-    bp.lumPow = 0.6;
-    bp.dr = driftAt(Pq, d, fi * 5.0);
-    bp.cover = 1.0;
-    bp.warm = RECT_WARM[i];
+    float lumF = barcode(Pq, d, fi + 0.5, RECT_GRAIN[i] * HERO_STREAK).x * (1.0 + HERO_GLOW * sw.z);
+    vec2 dr = driftAt(Pq, d, fi * 5.0);
+    bp.lumK = lumF * dr.x;
+    bp.tilt = dr.y;
+    bp.cover = FIXED_FAMILY + RECT_WARM[i] + 4.0 * dirIndex(ang);
 #ifdef BLOCK_DEBUG
     bp.dbg = vec4(1.0, 1.0, 0.0, sw.z > 0.0 ? 1.0 : 0.0);
 #endif
@@ -397,6 +369,7 @@ vec4 heroGlaze(int i, float u, vec2 uv, vec2 P, vec4 col) {
 #ifdef BLOCK_DEBUG
     if (sw.z > 0.0) return vec4(1.0, 1.0, 0.0, col.a);
 #endif
+    float meta = dirIndex(RECT_ANG[i]) + 4.0 * KIND_GLAZE;
     vec2 Pq = sw.xy;
     float fi = float(i);
     vec4 r = RECT_BOX[i];
@@ -407,62 +380,87 @@ vec4 heroGlaze(int i, float u, vec2 uv, vec2 P, vec4 col) {
     // a few threads of the grey bar are umber: other family, so opaque
     bool umber = grey && bc.z < BAR_UMBER;
     vec3 gc = umber ? srgbToLinear(UMBER) : srgbToLinear(RECT_COL[i]) * (grey ? BAR_TINT : vec3(1.0));
-    float lum = umber ? min(bc.x, 1.1) : bc.x * (1.0 + SORT_GLOW * sw.z) * mix(0.9, 1.3, top);
+    float lum = umber ? min(bc.x, 1.1) : bc.x * (1.0 + HERO_GLOW * sw.z) * mix(0.9, 1.3, top);
     gc = paintShade(gc, lum, driftAt(Pq, d, fi * 5.0));
     float fam = umber ? 1.0 : RECT_WARM[i];
-    bool same = (fam > 0.5) == (col.a > 0.5);
+    float w = mod(col.a, 2.0);   // col.a = warmth + 2 meta, see composite
+    bool same = (fam > 0.5) == (w > 0.5);
     float ga = same ? GLAZE * bc.y : 1.0;
-    return vec4(mix(col.rgb, gc, ga), same ? col.a : fam);
+    return vec4(mix(col.rgb, gc, ga), (same ? w : fam) + 2.0 * meta);
 }
 
-// Lay one block over the stack. Glazes (coverage < 1) stay translucent only
-// over paint of the same family; warm over cool would mix to mud, so the
-// block becomes opaque there.
-void composite(inout vec4 col, vec4 b, float bw) {
+// Lay one block (rgb, coverage; warmth bw) over the stack. Glazes (coverage
+// < 1) stay translucent only over paint of the same family; warm over cool
+// would mix to mud, so the block becomes opaque there.
+// The stack's alpha is warmth + 2 x meta: the warmth (0..1) decides the
+// family, meta = dirIndex + 4 x kind of the topmost paint is what the wet
+// smear needs (wet.glsl). Both share one float, because one more value live
+// across the grid loop tips the shader out of SIMD16.
+void composite(inout vec4 col, vec4 b, float bw, float meta) {
     if (b.a <= 0.0) return;
-    bool same = (bw > 0.5) == (col.a > 0.5);
+    float w = mod(col.a, 2.0);
+    bool same = (bw > 0.5) == (w > 0.5);
     float a = (b.a < 1.0 && same) ? b.a : 1.0;
-    col = a < 1.0 ? vec4(mix(col.rgb, b.rgb, a), col.a) : vec4(b.rgb, bw);
+    col = a < 1.0 ? vec4(mix(col.rgb, b.rgb, a), w + 2.0 * meta)
+                  : vec4(b.rgb, clamp(bw, 0.0, 1.0) + 2.0 * meta);
 }
 
 // The four block grids, back to front: large, wide-flat, medium, tall bars.
 const vec2 GRID_CELL[4] = vec2[](vec2(0.16, 0.22), vec2(0.21, 0.09), vec2(0.08, 0.13), vec2(0.075, 0.32));
 const vec2 GRID_OFFS[4] = vec2[](vec2(0.03, 0.07), vec2(0.11, 0.02), vec2(0.05, 0.11), vec2(0.02, 0.05));
 
-// col: rgb + warmth of the background smear
-vec3 layerBlocks(vec2 uv, vec2 P, vec4 col) {
-    // hit tests of the authored rectangles (cheap). Field rectangles are
-    // opaque, so only the topmost hit is painted; the glaze goes on top.
-    int hitF = -1, hitG = -1;
-    float uF = 0.0, uG = 0.0;
-    for (int i = 0; i < N_RECT; i++) {
-        float u = heroHit(i, uv, P);
-        if (u >= 0.0) {
-            if (i < N_FIELD_RECT) { hitF = i; uF = u; } else { hitG = i; uG = u; }
-        }
-    }
-
-    // the four grids back to front (k = 0..3), then the hero block (k = 4).
-    // One loop with a single smear and field lookup instead of five inlined
-    // copies keeps the shader small and within SIMD16 register limits.
-    for (int k = 0; k < 5; k++) {
-        BlockPaint bp;
-        if (k < 4) {
-            if (!blockGrid(uv, P, GRID_CELL[k], GRID_OFFS[k], float(k + 1), bp)) continue;
-        } else {
-            if (hitF < 0) continue;
-            bp = heroPaint(hitF, uF, P);
-        }
-        Smear sm = smearLookup(bp.P, bp.ang, bp.len, bp.spread, bp.dark, bp.seed);
-        vec4 f = baseField(bp.p0 + (sm.q - bp.P * bp.qSub) / REF_SIZE * bp.qScale);
-        float lum = (bp.lumPow == 1.0 ? sm.lum : pow(sm.lum, bp.lumPow)) * bp.lumF;
-        vec3 c = paintShade(f.rgb, lum, bp.dr);
+// Lay a finished paint job f (rgb + field warmth) of the given kind
+// (KIND_*, wet.glsl) over the stack.
+void layJob(inout vec4 col, PaintJob j, vec4 f, float kind) {
 #ifdef BLOCK_DEBUG
-        if (bp.dbg.a > 0.0) c = bp.dbg.rgb;
+    if (j.dbg.a > 0.0) f.rgb = j.dbg.rgb;
 #endif
-        composite(col, vec4(c, bp.cover), bp.warm < 0.0 ? f.a : bp.warm);
+    float dir = floor(j.cover / 4.0);
+    float cover = j.cover - 4.0 * dir;
+    bool fixedFam = cover >= FIXED_FAMILY;
+    composite(col, vec4(f.rgb, fixedFam ? 1.0 : cover), fixedFam ? cover - FIXED_FAMILY : f.a,
+              dir + 4.0 * kind);
+}
+
+// L1 + L2: the background smear, then the four grids back to front, then
+// the topmost hero field rectangle; the hero glazes go on top. Field
+// rectangles are opaque, so only the topmost hit is painted. Returns the
+// colour and, in .a, the grain direction and kind of the topmost paint
+// (dirIndex + 4 x KIND_*, wet.glsl); with NO_BLOCKS only the background is painted.
+vec4 layerPaint(vec2 uv, vec2 P) {
+    PaintJob bj = layerSmear(uv, P);
+    vec4 col = paintJob(bj, JOB_SMEAR);
+    // warmth + 2 x meta (see composite); the background's grain direction
+    // rides in its cover like the blocks' (KIND_SMEAR = 0)
+    col.a = clamp(col.a, 0.0, 1.0) + 2.0 * floor(bj.cover / 4.0);
+#ifndef NO_BLOCKS
+    // one loop instead of four inlined copies keeps the shader small
+    for (int k = 0; k < 4; k++) {
+        PaintJob j;
+        if (blockGrid(uv, P, GRID_CELL[k], GRID_OFFS[k], float(k + 1), j))
+            layJob(col, j, paintJob(j, JOB_GRID), KIND_GRID);
     }
 
+    // hit tests of the field rectangles (cheap)
+    int hit = -1;
+    float uh = 0.0;
+    for (int i = 0; i < N_FIELD_RECT; i++) {
+        float u = heroHit(i, uv, P);
+        if (u >= 0.0) { hit = i; uh = u; }
+    }
+    if (hit >= 0) {
+        PaintJob j = heroPaint(hit, uh, P);
+        layJob(col, j, paintJob(j, JOB_HERO), KIND_HERO);
+    }
+
+    // the glazes (the rectangles after the field ones), topmost hit only
+    int hitG = -1;
+    float uG = 0.0;
+    for (int i = N_FIELD_RECT; i < N_RECT; i++) {
+        float u = heroHit(i, uv, P);
+        if (u >= 0.0) { hitG = i; uG = u; }
+    }
     if (hitG >= 0) col = heroGlaze(hitG, uG, uv, P, col);
-    return col.rgb;
+#endif
+    return vec4(col.rgb, floor(col.a * 0.5));
 }

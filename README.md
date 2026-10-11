@@ -12,22 +12,33 @@ paste into Shadertoy.
 
 ## Layout
 
-| Path                                                  | Content                                                      |
-| ----------------------------------------------------- | ------------------------------------------------------------ |
-| `shaders/main.glsl`                                   | the layer stack, composited back to front                    |
-| `shaders/field.glsl`                                  | L0: base colour field, authored rectangles, zone maps        |
-| `shaders/smear.glsl`                                  | L1: smear operator (procedural pixel sort), background layer |
-| `shaders/blocks.glsl`                                 | L2: rectangle grids, authored blocks and glazes              |
-| `shaders/accents.glsl`                                | L3: dark wedge, soot strip, seam ink scratches, red specks   |
-| `shaders/grade.glsl`                                  | L4: glow over the yellow core, hue-split grade               |
-| `shaders/common.glsl`                                 | constants, hashes, noise, colour helpers                     |
-| `shaders/rival_{a,b,c}.glsl`                          | the three competing prototypes (record, still renderable)    |
-| `docs/analysis.md`                                    | analysis of the reference, the rivals, the verdict           |
-| `reference/reference.png`                             | the target image (1024x1024)                                 |
-| `main.go`, `render.go`, `preprocess.go`, `compare.go` | the runner                                                   |
-| `cmd/imgstat/`                                        | image analysis and style scoring tool                        |
-| `docs/reference-stats.txt`                            | `imgstat analyze` of the reference                           |
-| `out/`                                                | render output (git-ignored)                                  |
+| Path                                                                 | Content                                                                                          |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `shaders/main.glsl`                                                  | Image pass: wet smear of Buffer A, then accents, glow, grade, sRGB (`#bufferA "paint.glsl"`)     |
+| `shaders/paint.glsl`                                                 | Buffer A pass: the paint layers L0-L2, linear RGB; alpha packs grain direction, kind and wetness |
+| `shaders/field.glsl`                                                 | L0: base colour field, authored rectangles, zone maps                                            |
+| `shaders/smear.glsl`                                                 | L1: smear operator (procedural pixel sort), background layer                                     |
+| `shaders/blocks.glsl`                                                | L2: rectangle grids, authored blocks and glazes                                                  |
+| `shaders/wet.glsl`                                                   | W: wetness map and alpha packing (Buffer A), wet smear and sub-pixel edges (Image)               |
+| `shaders/accents.glsl`                                               | L3: dark wedge, soot strip, seam ink scratches, red drips and flecks (Image, after the smear)    |
+| `shaders/grade.glsl`                                                 | L4: glow over the yellow core, hue-split grade (Image)                                           |
+| `shaders/anim.glsl`                                                  | the seamless loop clock shared by all layers                                                     |
+| `shaders/common.glsl`                                                | constants, hashes, noise, colour helpers                                                         |
+| `shaders/rival_{a,b,c}.glsl`                                         | the three competing prototypes (record, still renderable)                                        |
+| `docs/analysis.md`                                                   | analysis of the reference, the rivals, the verdict                                               |
+| `docs/animation.md`                                                  | the animation concept and rules                                                                  |
+| `reference/reference.png`                                            | the target image (1024x1024)                                                                     |
+| `main.go`, `render.go`, `pipeline.go`, `preprocess.go`, `compare.go` | the runner (`pipeline.go`: multipass)                                                            |
+| `cmd/imgstat/`                                                       | image analysis and style scoring tool                                                            |
+| `docs/reference-stats.txt`                                           | `imgstat analyze` of the reference                                                               |
+| `out/`                                                               | render output (git-ignored)                                                                      |
+
+The painting renders in two passes. Buffer A (`paint.glsl`) paints L0-L2 crisp,
+in linear colour, into the RGBA16F buffer; its alpha carries what the Image pass
+needs per pixel. The Image pass (`main.glsl`) smears that paint along each pixel's
+grain where it is wet (W), then draws the dry accents (L3) and the light (L4) on
+top. Debug defines: `SHOW_FIELD`, `NO_BLOCKS`, `BLOCK_DEBUG`, `WET=0`,
+`AA_EDGE=0`, `WET_LIC=1`, `SHOW_WET` (see the header of `main.glsl`).
 
 `main.glsl` grew out of a competition between three approaches: a rectangle
 collage (A), a smear field (B) and stroke splatting (C). Each was prototyped as
@@ -57,8 +68,8 @@ go run -buildvcs=false . [flags]
 | `-times a,b,c`        | several shots; files are named `OUT_tNN.N.png`                                        |
 | `-frames N`, `-fps F` | with `-shot`: N frames from `-time` at F fps (default 30), named `OUT_00000.png`, ... |
 | `-compare REF.png`    | with `-shot`: also write `OUT_cmp.png` (render left, `REF.png` right)                 |
-| `-bench 3s`           | render offscreen for this long and print ms/frame                                     |
-| `-bundle OUT.glsl`    | write one self-contained Shadertoy file (includes inlined, defines applied)           |
+| `-bench 3s`           | render offscreen for this long and print ms/frame (multipass: also GPU ms per pass)   |
+| `-bundle OUT.glsl`    | write a self-contained Shadertoy file (includes inlined, defines applied), see below  |
 
 Window mode (no `-shot`/`-bench`/`-bundle`) reloads the shader when any included file
 changes. If the new version fails to compile, the runner prints the error log with
@@ -67,6 +78,51 @@ saves a PNG, `Esc` quits. `iMouse` follows Shadertoy conventions.
 
 `#include "file"` paths are relative to the including file and must stay inside the
 directory of the main shader (they are read through an `os.Root`).
+
+### Multipass: Buffer A
+
+A shader can render in two passes, like a Shadertoy with a Buffer A tab. The Image
+shader (the `-shader` file) names its buffer with a directive line:
+
+```glsl
+#bufferA "paint.glsl"
+```
+
+- The preprocessor removes the line. The path follows the `#include` rules: relative
+  to the file that contains the directive, inside the directory of the main shader.
+  The directive may appear once per shader, and Buffer A itself cannot declare one.
+- Each frame, Buffer A renders first, with the same uniforms and `-D` defines, into
+  an RGBA16F texture of the render size. Values above 1 and fine gradients survive.
+- The Image pass reads Buffer A on `iChannel0` with linear filtering and clamp to
+  edge, without mipmaps. `iChannelResolution[0]` holds the buffer size. The other
+  channels, and all channels of Buffer A, read black.
+- The buffer is reallocated when the window is resized.
+- Hot reload watches the files of both passes. If either pass fails to compile,
+  the runner keeps the last pair that worked. Errors in Buffer A start with
+  `Buffer A pass:`.
+- `-bench` prints the GPU time of each pass (timer queries) below the frame time.
+
+Shaders without the directive render in one pass, exactly as before.
+
+The directive is also recognised as a line comment, `// #bufferA "file"`. Bundles use
+that form, see below. A commented-out directive is therefore still active: to make a
+shader single-pass, delete the line.
+
+### Shadertoy bundles
+
+`-bundle OUT.glsl` inlines all includes and puts the `-D` defines on top as `#define`
+lines. A single-pass shader gives one file for the Image tab.
+
+A multipass shader gives two files:
+
+- `OUT.glsl` goes into the Image tab.
+- `OUT_bufferA.glsl` goes into the Buffer A tab.
+
+The header of `OUT.glsl` says to set the Image tab's iChannel0 to Buffer A with
+filter "linear" and wrap "clamp". It ends with `// #bufferA "OUT_bufferA.glsl"`.
+Shadertoy treats that line as a comment, but the runner reads it, so
+`-shader OUT.glsl` renders the bundle back with both passes. `just bundle` uses
+that as its check. Keep the two files next to each other.
 
 ### justfile recipes
 
@@ -78,7 +134,7 @@ directory of the main shader (they are read through an `os.Root`).
 | `just clip [start] [dur] [fps] [args]`                 | frame sequence into `out/clip/`, encoded as `out/clip.mp4` (needs ffmpeg) |
 | `just sheet [dir] [every] [grid] [crop] [width] [out]` | contact sheet of every n-th frame, for judging motion                     |
 | `just bench [dur] [args]`                              | benchmark at 1024x1024 and 2048x2048                                      |
-| `just bundle [args]`                                   | write `out/shadertoy.glsl` and render it back as a check                  |
+| `just bundle [args]`                                   | write `out/shadertoy.glsl` (+ `_bufferA`) and render it back as a check   |
 | `just stat [img]`                                      | `imgstat analyze` (default: the reference)                                |
 | `just stat-ref`                                        | regenerate `docs/reference-stats.txt`                                     |
 | `just score [renders...]`                              | `imgstat score` against the reference (default: `out/shot.png`)           |

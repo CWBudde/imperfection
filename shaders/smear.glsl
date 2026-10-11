@@ -44,6 +44,7 @@ const float GRIT        = 0.5;    // residual 1 px grit (the old salt-and-pepper
 const float TEX_FLOOR   = 0.06;   // strand variation for the texture terms above: minimum ...
 const float TEX_CAP     = 0.20;   // ... and maximum
 const float SKIP_CAP    = 0.14;   // skips stay faint in rough zones (no glitter)
+const float SKIP_COOL   = 3.0;    // extra skip rate in the cool top (and the hatching)
 
 // flow: each strand's texture repeats with a period of FLOW_PERIOD px (a whole
 // number of its segments) and travels one period per loop
@@ -199,6 +200,27 @@ Smear smearFlow(vec2 P, float ang, vec2 len, float spread, float dark, float see
     spread *= TEX_GAIN;
 
     // ---- brightness: the paint texture of the strand -----------------------
+    // (each term is folded into its sum as soon as it is known, and the
+    // per-segment factors come first: few values stay live, which keeps the
+    // shader within the SIMD16 register budget)
+    // dark scratches run the length of a strand segment (long drips); they
+    // are soft hairlines 1.5-3 px wide with a bell profile, one per 6 px cell
+    float dc = floor(t / 6.0);
+    vec3 hdk = hash33(vec3(dc + seed * 5.0, sidm, strand));
+    float dx = (t - (dc + 0.2 + 0.6 * hdk.y) * 6.0) / mix(0.7, 1.5, hdk.z);
+    float dprof = exp(-dx * dx);
+    float darkF = hdk.x < 1.6 * dark * rough * (1.0 - drip) ? mix(1.0, DARK_LUM, dprof) : 1.0;
+    // in hatching zones (dark > 0.08) whole strands can be dark brush strokes
+    float hatchF = fract(hseg * 7.31) < (dark - 0.08) * 3.0 ? HATCH_DARK : 1.0;
+
+    // the lookup point is settled here, so the axis and the segment are done
+    // with: each hairline also reads the field slightly beside its strand,
+    // so at a colour boundary threads of both colours interleave
+    float tq = t + (hl.y - 0.5) * THREAD_SPREAD * rough;
+    Smear r;
+    r.q = d * sq + n * tq;
+    float hb2 = hash11(floor(tq / mix(2.0, 4.0, hb.y)) * 3.71 + seed);
+
     // hairlines with their own, shorter segments (many starts and ends = the
     // fine streak texture), on top of a per-strand level and broad bands
     // across the grain
@@ -207,6 +229,7 @@ Smear smearFlow(vec2 P, float ang, vec2 len, float spread, float dark, float see
     float lid = mod(floor(fs * Nl / Pd + hl.y), Nl);
     float hline = hash12(vec2(line * 0.73 + seed, lid));
     float band = noise(vec2(t / 18.0, s / 600.0 + seed)) - 0.5;
+    float strandVar = 0.9 * (hseg - 0.5) + 0.8 * band + LINE_GRAIN * (hline - 0.5) + dripLum;
     // soft hairlines: smooth brightness ridges across the grain (2-5 px)
     // that break every 20-60 px along it - paint, not pixels
     float sw = mix(2.0, 5.0, hb.y);
@@ -215,6 +238,7 @@ Smear smearFlow(vec2 P, float ang, vec2 len, float spread, float dark, float see
     // dry-brush dashes: soft hairline dashes ~1 px across, 5-14 px along
     float mn = max(1.0, floor(Pd / mix(5.0, 14.0, hb.x) + 0.5));
     float mott = pnoise(vec2(t / 1.2 + seed * 3.0, fs * mn / Pd), mn, DASH_EDGE) - 0.5;
+    float texVar = SOFT_LINES * soft + MOTTLE * mott;
     // bristle skips: short breaks 2-3 px along the grain that cut across
     // 2-5 px of lines at once (cross-grain variation), with soft edges
     float kn = max(1.0, floor(Pd / mix(2.0, 3.0, hb.y) + 0.5));
@@ -222,35 +246,24 @@ Smear smearFlow(vec2 P, float ang, vec2 len, float spread, float dark, float see
     vec2 kp = vec2(t / kw, fs * kn / Pd);
     float kh = hash12(vec2(floor(kp.x) * 1.9 + seed, mod(floor(kp.y), kn)));
     vec2 kf = sin(PI * fract(kp));
-    float skip = kh < SKIP_RATE ? (fract(kh * 31.7) > 0.4 ? -1.0 : 0.7) * sqrt(kf.x * kf.y) : 0.0;
+    // (the cool top, dark > DARK_LINES, breaks more often: the reference's
+    // ice and steel drips are dry-brushed, with many short breaks across)
+    float skip = kh < SKIP_RATE * (1.0 + SKIP_COOL * smoothstep(0.05, 0.10, dark))
+               ? (fract(kh * 31.7) > 0.4 ? -1.0 : 0.7) * sqrt(kf.x * kf.y) : 0.0;
     // residual grit: 1 px wide dashes, faint
     float gn = max(1.0, floor(Pd / mix(2.0, 6.0, hl.x) + 0.5));
     float grit = hash12(vec2(floor(t) * 2.1 + seed, mod(floor(fs * gn / Pd), gn))) - 0.5;
 
     float tex = clamp(spread, TEX_FLOOR, TEX_CAP);
-    float lum = 1.0 + spread * (0.9 * (hseg - 0.5) + 0.8 * band + LINE_GRAIN * (hline - 0.5) + dripLum)
-                    + tex * (SOFT_LINES * soft + MOTTLE * mott + GRIT * grit)
+    float lum = 1.0 + spread * strandVar + tex * (texVar + GRIT * grit)
                     + min(tex, SKIP_CAP) * SKIP * skip;
-    // dark scratches run the length of a strand segment (long drips); they
-    // are soft hairlines 1.5-3 px wide with a bell profile, one per 6 px cell
-    float dc = floor(t / 6.0);
-    vec3 hdk = hash33(vec3(dc + seed * 5.0, sidm, strand));
-    float dx = (t - (dc + 0.2 + 0.6 * hdk.y) * 6.0) / mix(0.7, 1.5, hdk.z);
-    float dprof = exp(-dx * dx);
-    lum *= hdk.x < 1.6 * dark * rough * (1.0 - drip) ? mix(1.0, DARK_LUM, dprof) : 1.0;
-    // in hatching zones (dark > 0.08) whole strands can be dark brush strokes
-    lum *= fract(hseg * 7.31) < (dark - 0.08) * 3.0 ? HATCH_DARK : 1.0;
+    lum *= darkF;
+    lum *= hatchF;
     // lum is a factor on perceptual lightness (~ cube root of linear), so a
     // streak reads equally strong on navy and on yellow
     lum = max(lum, 0.2);
     lum = lum * lum * lum;
 
-    // each hairline also reads the field slightly beside its strand, so at
-    // a colour boundary threads of both colours interleave
-    t += (hl.y - 0.5) * THREAD_SPREAD * rough;
-
-    Smear r;
-    r.q = d * sq + n * t;
     r.lum = lum;
     // the warm/cool threshold wanders along each hairline, so where the two
     // families meet they alternate thread by thread instead of along one edge
@@ -258,7 +271,6 @@ Smear smearFlow(vec2 P, float ang, vec2 len, float spread, float dark, float see
     float tnn = max(1.0, floor(Pd / mix(10.0, 60.0, hl.y) + 0.5));
     float tn = pnoise1(fs * tnn / Pd, tnn, hl.x * 50.0) - 0.5;
     r.thr = clamp(0.5 + SEAM_DITHER * tn, 0.08, 0.92);
-    float hb2 = hash11(floor(t / mix(2.0, 4.0, hb.y)) * 3.71 + seed);
     // red threads come and go along their length (30-90 px pieces)
     float rn = max(1.0, floor(Pd / mix(30.0, 90.0, fract(hb2 * 7.3)) + 0.5));
     float rOn = smoothstep(0.35, 0.6, pnoise1(fs * rn / Pd, rn, hb2 * 40.0));
@@ -266,18 +278,101 @@ Smear smearFlow(vec2 P, float ang, vec2 len, float spread, float dark, float see
     return r;
 }
 
-// Static smear (the interface other layers use, e.g. the block grain).
-Smear smearLookup(vec2 P, float ang, vec2 len, float spread, float dark, float seed) {
-    return smearFlow(P, ang, len, spread, dark, seed, 0.0);
+// ---- paint jobs ---------------------------------------------------------------
+// The background (L1), the grid blocks and the hero blocks (L2) all paint the
+// same way: a smear, a field lookup at the smeared point, a brightness and
+// drift on the result. They only differ in their parameters, so the layers
+// fill in a PaintJob and paintJob() runs the two expensive lookups
+// (blocks.glsl: layerPaint calls it for the background, once inside the grid
+// loop and once for the hero block).
+// Register pressure: Mesa only builds the SIMD16 shader (about 1.5-2x faster
+// than SIMD8 here) if a quick estimate of the values live at once stays
+// under its limit, and the smear is where that peaks. Every job value that
+// is still needed after the smear stays live across it, so the job carries
+// as few of them as possible. Everything that only depends on the kind of
+// job follows from `kind`, a compile-time constant at each call site, so each
+// copy of paintJob() only contains what its kind needs (no drips in blocks).
+const int   JOB_SMEAR    = 0;    // L1 background: flowing paint, field read at the smeared point
+const int   JOB_GRID     = 1;    // grid block: field read at p0 + GRID_Q x the smeared point
+const int   JOB_HERO     = 2;    // hero block: field read at p0 + HERO_Q x the smear offset,
+                                 // softer grain (smear brightness ^ HERO_LUM_POW)
+const float GRID_Q       = 0.6;  // compression of the smeared point into the field (blocks)
+const float HERO_Q       = 0.25;
+const float HERO_LUM_POW = 0.6;
+const float FIXED_FAMILY = 2.0;  // cover >= FIXED_FAMILY: opaque, family = cover - FIXED_FAMILY
+
+struct PaintJob {
+    vec2  P;       // smear position (reference px)
+    float ang;     // smear / grain angle
+    vec2  len;     // segment length range (px)
+    float spread;  // streak contrast
+    float dark;    // share of dark scratches
+    float seed;    // smear seed
+    vec2  p0;      // field lookup origin (uv), see kind
+    float lumK;    // brightness factor on top of the smear brightness (incl. drift)
+    float tilt;    // hue tilt of the drift (blocks.glsl: driftAt().y)
+    float cover;   // < 1: glaze opacity over its own family, 1: opaque, both with
+                   // the family of the field paint; >= FIXED_FAMILY: see above;
+                   // plus 4 x the grain's dirIndex (wet.glsl), which rides here
+                   // because cover is live across the smear anyway (SIMD16)
+#ifdef BLOCK_DEBUG
+    vec4  dbg;     // debug colour, shown where .a > 0
+#endif
+};
+
+// An empty job. Every job starts from this: a field left unwritten on some
+// path (e.g. an early return of blockGrid) would be carried over from the
+// previous iteration of the grid loop and stay live across the whole loop,
+// which is enough to tip the shader out of SIMD16.
+PaintJob noJob() {
+    PaintJob j;
+    j.P = vec2(0.0);
+    j.ang = 0.0;
+    j.len = vec2(0.0);
+    j.spread = 0.0;
+    j.dark = 0.0;
+    j.seed = 0.0;
+    j.p0 = vec2(0.0);
+    j.lumK = 1.0;
+    j.tilt = 0.0;
+    j.cover = 1.0;
+#ifdef BLOCK_DEBUG
+    j.dbg = vec4(0.0);
+#endif
+    return j;
+}
+
+// Apply a streak brightness lum and the drift dr (blocks.glsl: driftAt) to
+// paint c: lightness plus a hue tilt that stays inside the paint's family.
+vec3 paintShade(vec3 c, float lum, vec2 dr) {
+    c = shade(c, lum * dr.x);
+    return c * vec3(1.0, 1.0 + 2.0 * dr.y, 1.0 + dr.y * (c.b > c.r ? 1.0 : -1.0));
+}
+
+// Run a paint job of the given kind: rgb + warmth. Flowing paint (L1) reads
+// the field with its per-hairline warm/cool threshold and carries red
+// threads; static paint (blocks) uses the neutral switch.
+vec4 paintJob(PaintJob j, int kind) {
+    bool flowing = kind == JOB_SMEAR, hero = kind == JOB_HERO;
+    Smear sm = smearFlow(j.P, j.ang, j.len, j.spread, j.dark, j.seed, flowing ? 1.0 : 0.0);
+    vec2 q = flowing ? sm.q / REF_SIZE
+           : j.p0 + (hero ? (sm.q - j.P) / REF_SIZE * HERO_Q : sm.q / REF_SIZE * GRID_Q);
+    // only the hero itself sees its rectangle in BG_SKIP (field.glsl); the
+    // background and the grid blocks around it read the field without it
+    vec4 f = baseField(q, (flowing ? sm.thr : 0.5) + (hero ? 0.0 : FIELD_BG));
+    float lum = (hero ? pow(sm.lum, HERO_LUM_POW) : sm.lum) * j.lumK;
+    f.rgb = paintShade(hueThread(f.rgb, flowing ? sm.hue : 0.0), lum, vec2(1.0, j.tilt));
+    return f;
 }
 
 // ---- L1: background smear ---------------------------------------------------
-vec4 layerSmear(vec2 uv, vec2 P) {
-    float ang, spread, dark;
-    vec2 len;
-    directionField(uv, ang, len, spread, dark);
-    Smear sm = smearFlow(P, ang, len, spread, dark, 1.0, 1.0);
-    vec4 f = baseField(sm.q / REF_SIZE, sm.thr);
-    f.rgb = shade(hueThread(f.rgb, sm.hue), sm.lum);
-    return f;
+// The paint job of the background: the lookup dragged along the direction
+// field, flowing.
+PaintJob layerSmear(vec2 uv, vec2 P) {
+    PaintJob j = noJob();
+    directionField(uv, j.ang, j.len, j.spread, j.dark);
+    j.P = P;
+    j.seed = 1.0;
+    j.cover = 1.0 + 4.0 * dirIndex(j.ang);   // opaque, plus the grain direction
+    return j;     // the rest as in noJob(): no drift
 }

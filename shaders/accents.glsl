@@ -20,12 +20,16 @@
 
 // ---- wedge ----
 const vec2  WEDGE_PT    = vec2(0.80, 0.675); // a point on the 45 deg wedge edge (uv)
-const float WEDGE_LANE  = 3.0;    // width of one brush lane across the edge (reference px)
+const vec2  WEDGE_LANE  = vec2(3.0, 11.0); // brush stroke width range across the edge (reference px)
+const float WEDGE_GROUP = 28.0;   // strokes of one width come in groups this wide (reference px)
 const float WEDGE_SEG   = 72.0;   // mean stroke segment length along the edge (reference px)
 const float WEDGE_NSEG  = 8.0;    // segments per lane period (the lane pattern repeats after this)
-const float WEDGE_FRAY  = 0.035;  // how far single dark strokes reach out of the wedge (uv)
+const float WEDGE_FRAY  = 0.05;   // how far single dark strokes reach out of the wedge (uv)
+const float WEDGE_STEP  = 0.06;   // coarse in/out step of whole stroke groups along the edge (uv)
 const float WEDGE_BREATH = 0.010; // edge breathing amplitude across the edge (uv)
-const float WEDGE_INK   = 0.92;   // opacity of the dark wedge paint
+const vec2  WEDGE_INK   = vec2(0.80, 1.00); // opacity range of one dark stroke
+const float WEDGE_UNDER = 0.88;   // mean opacity of the dark ground between the strokes
+const float WEDGE_THIN  = 0.35;   // the ground thins this much deep in the corner (navy shows)
 
 // ---- soot ----
 const float SOOT_TOP    = 0.342;  // shadow strip under the red band: mean top edge (v)
@@ -39,7 +43,7 @@ const float SCRATCH_DENS = 0.62;  // share of cells holding a scratch (inside th
 const float SCRATCH_SLOTS = 1.0;  // lives per loop and cell
 const float SCRATCH_GROW = 0.12;  // part of a life spent drawing the scratch
 const float SCRATCH_FADE = 0.75;  // part of a life after which the ink fades
-const float SCRATCH_BROAD = 0.4;  // share of broad dry-brush smudges among the scratches
+const float SCRATCH_BROAD = 0.55; // share of broad dry-brush smudges among the scratches
 
 // ---- red drips ----
 const float DRIP_COL    = 7.0;    // one possible drip per column this wide (reference px)
@@ -50,14 +54,29 @@ const float DRIP_DRY    = 0.78;   // part of a life after which it dries away
 const vec2  DRIP_U      = vec2(0.49, 0.76); // u range of the dripping band edge
 
 // ---- dry-brush flecks (ACC_RED 2/3) ----
-const vec2  FLECK_CELL  = vec2(32.0, 3.0); // fleck grid (reference px): along (tiles SOOT_PERIOD), across
-const float FLECK_DENS  = 0.5;    // share of fleck cells holding a dash (at full cluster)
-const float FLECK_TOP   = 0.312;  // flecks stay below this (v), the drips hang above
+const vec2  FLECK_CELL  = vec2(16.0, 3.0); // fleck grid (reference px): along (tiles SOOT_PERIOD), across
+const float FLECK_DENS  = 0.8;    // share of fleck cells holding a dab (at full cluster)
+const vec2  FLECK_LEN   = vec2(2.5, 13.0); // dab length range (reference px; most are short)
+const float FLECK_RAG   = 0.9;    // raggedness of a dab's top and bottom edge (reference px)
+const float FLECK_TOP   = 0.334;  // flecks stay below this (v), scattered under the drips
 const float FLECK_SLOTS = 1.0;    // lives per loop and cell
 const float FLECK_GROW  = 0.06;   // part of a life spent brushing the dash in
 const float FLECK_FADE  = 0.80;   // part of a life after which it fades
 
 // ---- helpers ----------------------------------------------------------------
+// Edges: everything here is drawn after the wet smear (wet.glsl), so it has
+// to be soft by itself. No edge is a binary pixel cut: coverage ramps over
+// about 1-1.5 px (AA_PX) at a continuous, hashed position, so a cut reads
+// edgy, like a painted edge, not like a pixel boundary.
+const float AA_PX       = 0.75;   // half width of an edge transition (reference px)
+
+// Hash per cell of x with a steep but not binary step between cells (over
+// about 0.4 cell): dashes that end within a pixel, not on a pixel boundary.
+float edgyHash(float a, float x) {
+    float i = floor(x), f = fract(x);
+    return mix(hash12(vec2(a, i)), hash12(vec2(a, i + 1.0)), smoothstep(0.3, 0.7, f));
+}
+
 // 1D value noise in [0, 1], periodic with n lattice cells, decorrelated by seed.
 float accNoiseP(float x, float n, float seed) {
     float i = floor(x), f = fract(x);
@@ -67,23 +86,30 @@ float accNoiseP(float x, float n, float seed) {
 }
 
 // ---- wedge ------------------------------------------------------------------
-// Upper right: everything right of a 45 deg line through WEDGE_PT sinks into
-// blue-black. The edge is brushed: lanes of dark strokes along 45 deg reach
-// out of the wedge by a hashed amount, with ragged ends. The strokes slide
-// along their lane and the whole edge breathes across.
+// Upper right: right of a 45 deg line through WEDGE_PT the paint sinks into
+// blue-black. The wedge is painted, not ruled: lanes of dark brush strokes
+// (3-11 px wide) run along 45 deg; every stroke segment reaches its own
+// distance out of the wedge or stops short of it, and whole groups of
+// strokes step in or out, so the edge is a staircase of 45 deg strokes with
+// ragged ends. Inside, the strokes lie on a translucent dark ground; their
+// load varies, the bristles break into dry dashes, and deep in the corner
+// the ground thins, so the blue texture beneath shows through. The strokes
+// slide along their lanes and the whole edge breathes across.
 vec3 layerWedge(vec2 uv, vec2 P, vec3 col) {
     const vec2 dir = vec2(0.70710678, 0.70710678);   // along the edge, 45 deg
     vec2 nrm = vec2(dir.y, -dir.x);                  // points into the wedge
     float vm = smoothstep(0.46, 0.56, uv.y) * (1.0 - smoothstep(0.90, 0.97, uv.y));
     if (vm <= 0.0) return col;
     float b = dot(P, nrm);
-    float lane = floor(b / WEDGE_LANE);
+    float d = dot(uv - WEDGE_PT, nrm) + WEDGE_BREATH * loopNoise(3.0, 2.0);   // whole edge breathes
+    if (d < -WEDGE_FRAY - WEDGE_STEP) return col;
+
+    // brush lanes: groups of strokes of one width
+    float grp = floor(b / WEDGE_GROUP);
+    float lw = mix(WEDGE_LANE.x, WEDGE_LANE.y, hash11(grp * 1.91 + 2.0));
+    float lane = floor(b / lw) + grp * 53.0;
     float hl = hash11(lane * 1.37 + 5.0);
-    float d = dot(uv - WEDGE_PT, nrm)
-            + WEDGE_BREATH * loopNoise(3.0, 2.0)               // whole edge breathes
-            + 0.004 * loopNoise(lane * 0.37 + 9.0, 3.0)        // single lanes waver
-            + (noise1(b / 9.0) - 0.5) * 0.02;                  // slow wander across lanes
-    if (d < -WEDGE_FRAY - 0.01) return col;
+    d += 0.004 * loopNoise(lane * 0.37 + 9.0, 3.0);                     // single lanes waver
 
     // stroke segments of this lane, sliding along 45 deg (1-2 lane periods per loop)
     float per = WEDGE_SEG * WEDGE_NSEG;
@@ -92,23 +118,41 @@ vec3 layerWedge(vec2 uv, vec2 P, vec3 col) {
     float f = fract(a / WEDGE_SEG);
     vec3 hs = hash33(vec3(mod(k, WEDGE_NSEG), lane, 3.3));
     // ragged ends, soft over a few px
-    float ext = smoothstep(hs.y * 0.35, hs.y * 0.35 + 0.06, f)
-              * (1.0 - smoothstep(1.0 - hs.z * 0.35 - 0.06, 1.0 - hs.z * 0.35, f));
-    // the lane is a bundle of 1.2 px bristles: each reaches its own distance
-    // and carries its own load, so the stroke frays into hairlines
+    float ext = smoothstep(hs.y * 0.3, hs.y * 0.3 + 0.05, f)
+              * (1.0 - smoothstep(1.0 - hs.z * 0.3 - 0.05, 1.0 - hs.z * 0.3, f));
+    // coarse steps: a whole group of strokes laid further in or out, in
+    // pieces of 0.6-1.8 segments along the edge (fixed on the canvas)
+    // every lane of the group starts and ends the piece at its own place and
+    // the step tapers toward the piece ends, so a stepped group ends ragged,
+    // like a brush lifting off, not like a rotated box
+    float a0 = dot(P, dir);
+    float sl = mix(0.6, 1.8, hash11(grp * 3.7 + 1.0)) * WEDGE_SEG;
+    float pa = a0 / sl + hash11(grp) * 3.0 + 0.35 * (hl - 0.5);
+    float pf = fract(pa);
+    float st = 0.6 + (hash12(vec2(grp, floor(pa))) - 0.6)
+                   * smoothstep(0.0, mix(0.15, 0.4, fract(hl * 3.1)), min(pf, 1.0 - pf));
+    // the stroke's own reach: some stop short (blue gaps behind the edge),
+    // some run out into the blue
+    float reach = WEDGE_FRAY * (1.4 * hs.x * hs.x - 0.4) + WEDGE_STEP * (st - 0.6) * 2.0;
+    float edge = ext * smoothstep(-AA_PX, AA_PX, (reach + d) * REF_SIZE)
+               * mix(1.0, 0.75, smoothstep(0.0, WEDGE_FRAY, -d));         // thin where it reaches out
+    // 1.2 px bristles break into dry dashes, most where the stroke is thin
     float bi = floor(b / 1.2);
     float hb = hash11(bi * 1.37);
-    float reach = WEDGE_FRAY * hs.x * hs.x * mix(0.4, 1.3, fract(hb * 7.9));
-    float stroke = ext * step(-d, reach) * step(0.3, hb) * mix(0.45, 1.0, hb)
-                 * mix(1.0, 0.5, smoothstep(0.0, WEDGE_FRAY, -d));
-    // solid inside, with a few dry lanes letting the blue through near the edge
-    float inside = smoothstep(-0.006, 0.012, d) * mix(1.0, 0.6, ext * step(0.8, hs.x) * (1.0 - smoothstep(0.0, 0.05, d)));
-    float z = max(inside, stroke) * vm;
+    float dash = edgyHash(bi * 1.3 + lane, a / mix(4.0, 18.0, fract(hb * 5.3)));
+    float dryS = 1.0 - smoothstep(0.0, 0.04, d) * ext;
+    float bristle = mix(0.7, 1.0, hb) * mix(1.0, smoothstep(0.25, 0.6, dash), 0.35 + 0.5 * dryS);
+    // the dark ground: behind the edge, lane by lane, thinning into the corner
+    float ground = smoothstep(0.0, 0.03, d + WEDGE_STEP * (st - 0.5)) * WEDGE_UNDER
+                 * mix(0.7, 1.22, hl) * (1.0 - WEDGE_THIN * smoothstep(0.08, 0.2, d))
+                 * (1.0 + 0.12 * (1.0 - smoothstep(0.03, 0.09, d)));   // densest just behind the edge
+    float z = max(edge * mix(WEDGE_INK.x, WEDGE_INK.y, hs.x) * bristle, ground * mix(0.8, 1.0, hb)) * vm;
     if (z <= 0.0) return col;
-    // the dark paint keeps a fine 45 deg grain (the same bristles)
-    float g = hb - 0.5;
-    vec3 ink = hexColor(0x03080f) * (1.0 + 0.7 * g);
-    return mix(col, ink, WEDGE_INK * z);
+    // blue-black ink, a little bluer in the lighter strokes
+    vec3 ink = mix(hexColor(0x020509), hexColor(0x0a1a2a), fract(hl * 7.3)) * (1.0 + 0.6 * (hb - 0.5));
+    // coverage is perceptual (gamma-shaped weight in linear light), so a
+    // half-loaded stroke reads half dark
+    return mix(col, ink, 1.0 - pow(1.0 - min(z, 0.98), 2.2));
 }
 
 // ---- soot -------------------------------------------------------------------
@@ -132,7 +176,10 @@ vec3 layerSoot(vec2 uv, vec2 P, vec3 col) {
     float bot = SOOT_BOT + (accNoiseP(xs / 64.0, SOOT_PERIOD / 64.0, 7.0) - 0.5) * 0.026
                          + (hc - 0.5) * 0.008;
     float zx = smoothstep(0.42, 0.50, uv.x);
-    if (uv.y < bot || uv.y > top || zx <= 0.0) return col;
+    // soft top and bottom edge (the per-column fray already puts them at
+    // fractional heights)
+    float ez = smoothstep(-AA_PX, AA_PX, (top - uv.y) * REF_SIZE) * smoothstep(-AA_PX, AA_PX, (uv.y - bot) * REF_SIZE);
+    if (ez <= 0.0 || zx <= 0.0) return col;
     float row = floor(P.y / 1.5);
     float hr = hash11(row * 3.1);
     // per-row grain period 8..64 px (power of two, so it tiles SOOT_PERIOD)
@@ -143,7 +190,7 @@ vec3 layerSoot(vec2 uv, vec2 P, vec3 col) {
     // the grain lets the paint beneath show through in horizontal scrapes;
     // some rows are scraped thinner than others
     float thin = SOOT_SCRAPE * step(0.7, fract(hr * 13.7));
-    return mix(col, soot, zx * mix(0.6 - thin, 0.94, smoothstep(0.3, 0.7, g)));
+    return mix(col, soot, zx * ez * mix(0.6 - thin, 0.94, smoothstep(0.3, 0.7, g)));
 }
 
 // ---- ink scratches ----------------------------------------------------------
@@ -166,14 +213,14 @@ float zoneSeam(vec2 uv) {
 //   t   across the stroke in [-0.5, 0.5], s along in [0, 1] (0 = top)
 //   dry 0 = wet, solid ink; 1 = very dry, sparse flecks
 float inkDry(vec2 P, float t, float s, float seed, float dry) {
-    float bh = hash12(vec2(floor(P.x), seed));
+    float bh = edgyHash(seed, P.x);   // neighbouring bristles blend a little
     float dl = mix(2.0, 6.0, fract(bh * 7.7));
-    float dash = hash12(vec2(floor(P.x) * 1.7 + seed, floor(P.y / dl + bh * 5.0)));
+    float dash = edgyHash(floor(P.x) * 1.7 + seed, P.y / dl + bh * 5.0);
     // each bristle touches down a little later: ragged top instead of a cut
     float start = smoothstep(0.0, 0.04 + 0.1 * fract(bh * 3.1), s);
     float env = (1.0 - smoothstep(0.18, 0.5, abs(t))) * mix(1.0, 0.55, smoothstep(0.45, 1.0, s)) * start;
     float v = env * mix(0.6, 1.0, bh) + (dash - 0.5) * mix(0.3, 0.9, dry);
-    return smoothstep(0.25 + 0.3 * dry, 0.45 + 0.3 * dry, v);
+    return smoothstep(0.2 + 0.3 * dry, 0.5 + 0.3 * dry, v);   // edgy, not binary
 }
 
 vec3 layerScratches(vec2 uv, vec2 P, vec3 col) {
@@ -211,10 +258,14 @@ vec3 layerScratches(vec2 uv, vec2 P, vec3 col) {
                       * (0.75 + 0.5 * noise1(P.y / 9.0 + h.x * 70.0))  // pressure wavers
                       * mix(0.3, 1.0, smoothstep(0.0, 0.08, grow - s));
         float t = (P.x - x0) / w;
-        if (abs(t) >= 0.5) continue;
+        float ta = 0.35 / w;   // across-stroke supersampling offset (0.35 px)
+        if (abs(t) >= 0.5 + ta) continue;
         best = h.z;
         float dry = mix(0.28, 0.65, broad) + 0.3 * smoothstep(0.4, 1.0, s);
-        cov = inkDry(P, t, s, h.z * 29.0, dry) * mix(0.95, 0.85, broad) * fade;
+        // two samples 0.7 px apart across the stroke: the pen edge and the
+        // bristle columns get partial coverage instead of a binary pixel cut
+        vec2 px = vec2(0.35, 0.0);
+        cov = 0.5 * (inkDry(P - px, t - ta, s, h.z * 29.0, dry) + inkDry(P + px, t + ta, s, h.z * 29.0, dry)) * 0.85 * fade;
         // broad strokes leave a thin wash of diluted ink between the bristles
         wash = broad * (1.0 - smoothstep(0.05, 0.5, abs(t))) * 0.22 * fade
              * smoothstep(0.0, 0.15, s) * (1.0 - smoothstep(0.6, 1.0, s));
@@ -242,6 +293,7 @@ vec3 layerRedDrips(vec2 uv, vec2 P, vec3 col) {
         || uv.y > SOOT_TOP + 0.04 || uv.y < SOOT_BOT - 0.05) return col;
     float ci = floor(P.x / DRIP_COL);
     vec2 ev = loopEvent(RED_DRIP_SLOTS, ci * 1.71 + 11.0);
+    if (ANIM <= 0.0) ev.x = 0.0;   // -D ANIM=0: the drips of slot 0 (the t = 0 frame) stay
     vec3 h = hash33(vec3(ci, ev.x, 41.0));
     vec3 h2 = hash33(vec3(ci, ev.x, 77.0));
     float zone = smoothstep(DRIP_U.x, DRIP_U.x + 0.03, uv.x) * (1.0 - smoothstep(DRIP_U.y - 0.04, DRIP_U.y, uv.x));
@@ -264,8 +316,12 @@ vec3 layerRedDrips(vec2 uv, vec2 P, vec3 col) {
     float wob = 1.0 + 0.3 * (noise1(y / 5.0 + h.x * 40.0) - 0.5);
     float w = wT * wob * mix(1.0, 0.6, clamp(y / max(run, 1.0), 0.0, 1.0))
             * (1.0 + 0.8 * (1.0 - smoothstep(0.0, 7.0, y)));
+    // not every drip ends in a bead (no row of pins): some just taper out,
+    // and the beads differ in weight
+    float beadW = step(0.35, fract(h2.y * 7.1)) * mix(1.1, 1.5, fract(h.x * 13.7));
     float bead = smoothstep(run - 1.4 * bl, run - 0.35 * bl, y) * (1.0 - smoothstep(run - 0.1 * bl, run + 0.5 * bl, y));
-    w = max(w * step(y, run), wT * 1.45 * bead * smoothstep(5.0, 12.0, run));
+    w = max(w * step(y, run) * mix(1.0, 1.0 - 0.6 * smoothstep(0.6 * run, run, y), 1.0 - step(0.5, beadW)),
+            wT * beadW * bead * smoothstep(5.0, 12.0, run));
     float dx = abs(P.x + 0.5 - x0);                   // sub-pixel centre of the thread
     float cov = 1.0 - smoothstep(0.5 * w - 0.6, 0.5 * w + 0.6, dx);
     if (cov <= 0.0) return col;
@@ -281,47 +337,57 @@ vec3 layerRedDrips(vec2 uv, vec2 P, vec3 col) {
 }
 
 // ---- dry-brush flecks -------------------------------------------------------
-// Short horizontal dashes of dry crimson along the soot grain, clustered and
-// thickest near the band. They ride the soot's sideways drift, are brushed
-// in left to right and fade, one per cell and event slot.
+// Dabs of dry crimson scraped into the soot: short and blotchy, 2.5-13 px
+// along the soot grain (0 deg) and 1.5-3.5 px across, with ragged top and
+// bottom edges (every pixel column of a dab has its own extent) and a broken,
+// dry interior. They sit in clusters, thickest near the band, ride the soot's
+// sideways drift, are dabbed in left to right and fade, one per cell and
+// event slot.
 vec3 layerRedFlecks(vec2 uv, vec2 P, vec3 col) {
-    float zone = box(uv, vec2(0.49, SOOT_BOT - 0.01), vec2(0.75, FLECK_TOP), 0.008);
+    float zone = box(uv, vec2(0.49, SOOT_BOT - 0.02), vec2(0.75, FLECK_TOP), 0.012);
     if (zone <= 0.0) return col;
     float drift = loopScroll(1.0, SOOT_PERIOD);
     vec2 Q = vec2(P.x + drift, P.y);
     vec2 gi = floor(Q / FLECK_CELL);
     float nc = SOOT_PERIOD / FLECK_CELL.x;           // cells per drift period
     // nearer the band = more red
-    float near = mix(0.5, 1.0, smoothstep(SOOT_BOT - 0.01, FLECK_TOP, uv.y));
+    float near = mix(0.45, 1.0, smoothstep(SOOT_BOT - 0.02, FLECK_TOP, uv.y));
     float cov = 0.0;
     vec3 red = vec3(0.0);
     for (int i = -1; i <= 0; i++) {
         vec2 c = vec2(mod(gi.x + float(i), nc), gi.y);
         vec2 ev = loopEvent(FLECK_SLOTS, hash12(c + 9.0) * 53.0);
         vec3 h = hash33(vec3(c, 5.0 + ev.x * 3.1));
-        float cluster = smoothstep(0.4, 0.75, accNoiseP(c.x * FLECK_CELL.x / 48.0, SOOT_PERIOD / 48.0, c.y * 0.37));
+        // tight clusters: a sharper cluster noise at a shorter scale
+        float cluster = smoothstep(0.42, 0.72, accNoiseP(c.x * FLECK_CELL.x / 32.0, SOOT_PERIOD / 32.0, c.y * 0.37));
         if (h.z > FLECK_DENS * cluster * zone * near) continue;
-        float x0 = (gi.x + float(i) + h.x * 0.6) * FLECK_CELL.x;
-        float len = mix(10.0, 40.0, h.y);
+        float x0 = (gi.x + float(i) + h.x * 0.7) * FLECK_CELL.x;
+        float len = mix(FLECK_LEN.x, FLECK_LEN.y, h.y * h.y);
         float grow = mix(1.0, smoothstep(0.0, FLECK_GROW, ev.y), ANIM);
         float fade = 1.0 - ANIM * smoothstep(FLECK_FADE, 1.0, ev.y);
         float sx = (Q.x - x0) / len;
-        if (sx < 0.0 || sx > grow) continue;
-        float hy = mix(1.5, 3.0, fract(h.z * 17.0));
+        if (sx < -0.1 || sx > grow + 0.1) continue;
+        float hy = mix(1.5, 3.5, fract(h.z * 17.0)) * mix(1.0, 0.6, smoothstep(0.3, 1.0, sx));
         float yc = (c.y + 0.5) * FLECK_CELL.y + (fract(h.z * 31.0) - 0.5) * 1.5;
-        float ty = (Q.y - yc) / hy;
-        if (abs(ty) > 0.5) continue;
-        // 1 px bristles across, each breaking into dashes along the stroke;
-        // the stroke starts loaded and runs dry to the right
+        // ragged top and bottom: each pixel column of the dab reaches its own
+        // extent (edgyHash: steep, but not binary between columns)
+        float hc = edgyHash(h.z * 71.0, Q.x);
+        float hc2 = edgyHash(h.z * 37.0 + 5.0, Q.x * 1.3);
+        float ty = Q.y - yc - (hc - 0.5) * FLECK_RAG;
+        float ext = 0.5 * hy + (hc2 - 0.5) * FLECK_RAG;
+        float ay = 1.0 - smoothstep(ext - AA_PX, ext + AA_PX, abs(ty));
+        // soft dab ends within a pixel
+        float ax = smoothstep(-0.1, 0.1 + 0.6 / len, sx) * (1.0 - smoothstep(grow - 0.6 / len, grow + 0.1, sx));
+        if (ay * ax <= 0.0) continue;
+        // dry interior: 1 px bristles across, broken into 1.5-4 px pieces
         float bi = floor(Q.y);
         float bh = hash12(vec2(bi, h.z * 31.0));
-        float dash = hash12(vec2(bi * 1.3 + h.x * 17.0, floor(Q.x / mix(2.0, 5.0, bh))));
-        float env = (1.0 - smoothstep(0.55, 1.0, sx)) * smoothstep(0.0, 0.06, sx) * mix(0.5, 1.0, bh);
-        float cv = smoothstep(0.35, 0.5, env + 0.6 * (dash - 0.5));
-        float a = cv * fade * mix(0.6, 0.9, fract(h.y * 3.7));
+        float dash = edgyHash(bi * 1.3 + h.x * 17.0, Q.x / mix(1.5, 4.0, bh));
+        float cv = smoothstep(0.25, 0.5, mix(0.75, 1.0, bh) + 0.7 * (dash - 0.5) - 0.3 * sx);
+        float a = cv * ay * ax * fade * mix(0.65, 0.95, fract(h.y * 3.7));
         if (a > cov) {
             cov = a;
-            red = mix(hexColor(0x7e1018), hexColor(0xc0242a), fract(h.y * 5.3)) * mix(0.75, 1.1, bh);
+            red = mix(hexColor(0x7e1018), hexColor(0xd02a26), fract(h.y * 5.3)) * mix(0.75, 1.1, bh);
         }
     }
     return mix(col, red, cov);
