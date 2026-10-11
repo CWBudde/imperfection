@@ -19,8 +19,9 @@ in vec2 vert;
 void main() { gl_Position = vec4(vert, 0.0, 1.0); }
 `
 
-// fragmentPrefix declares the Shadertoy uniforms. Unbound iChannel samplers
-// read as black, so shaders that reference them still compile and run.
+// fragmentPrefix declares the Shadertoy uniforms. iChannelN samples texture
+// unit N; unbound channels read as black, so shaders that reference them still
+// compile and run.
 const fragmentPrefix = `#version 410
 precision highp float;
 uniform vec3  iResolution;
@@ -55,12 +56,14 @@ type frameUniforms struct {
 	frame         int32
 	mouse         [4]float32
 	date          [4]float32
+	channelRes    [4][3]float32 // iChannelResolution; zero for unbound channels
 }
 
 // program is a linked Shadertoy program plus its uniform locations.
 type program struct {
 	id                                         uint32
 	res, time, delta, rate, frame, mouse, date int32
+	channelRes                                 int32
 }
 
 func (p *program) delete() {
@@ -110,12 +113,14 @@ func buildProgram(body *source, defs defineList) (*program, error) {
 	prog := &program{
 		id: id, res: loc("iResolution"), time: loc("iTime"), delta: loc("iTimeDelta"),
 		rate: loc("iFrameRate"), frame: loc("iFrame"), mouse: loc("iMouse"), date: loc("iDate"),
+		channelRes: loc("iChannelResolution"),
 	}
-	// Point all channels at unit 0, where no texture is bound (reads black).
+	// Channel N samples unit N. Only a multipass Image pass binds a texture
+	// (Buffer A on unit 0); every other unit stays empty and reads black.
 	gl.UseProgram(id)
 
-	for i := range 4 {
-		gl.Uniform1i(loc(fmt.Sprintf("iChannel%d", i)), 0)
+	for i := range int32(4) {
+		gl.Uniform1i(loc(fmt.Sprintf("iChannel%d", i)), i)
 	}
 
 	gl.Uniform1f(loc("iSampleRate"), 44100)
@@ -196,24 +201,38 @@ func (q *quad) draw(prog *program, uni frameUniforms) {
 	gl.Uniform1i(prog.frame, uni.frame)
 	gl.Uniform4f(prog.mouse, uni.mouse[0], uni.mouse[1], uni.mouse[2], uni.mouse[3])
 	gl.Uniform4f(prog.date, uni.date[0], uni.date[1], uni.date[2], uni.date[3])
+	gl.Uniform3fv(prog.channelRes, int32(len(uni.channelRes)), &uni.channelRes[0][0])
 	gl.BindVertexArray(q.vao)
 	gl.DrawArrays(gl.TRIANGLE_STRIP, 0, 4)
 	gl.BindVertexArray(0)
 }
 
-// fbo is an offscreen RGBA8 render target.
+// texFormat describes the colour texture of an fbo.
+type texFormat struct {
+	internal  int32  // internal format, e.g. gl.RGBA8
+	pixelType uint32 // matching client pixel type, e.g. gl.UNSIGNED_BYTE
+	filter    int32  // min and mag filter
+}
+
+// shotFormat is the 8-bit target that offscreen shots are read back from.
+var shotFormat = texFormat{internal: gl.RGBA8, pixelType: gl.UNSIGNED_BYTE, filter: gl.NEAREST}
+
+// fbo is an offscreen render target with one colour texture (no mipmaps,
+// clamped to the edge). newFBO leaves it bound as the framebuffer.
 type fbo struct {
 	id, tex       uint32
 	width, height int
 }
 
-func newFBO(w, h int) (*fbo, error) {
+func newFBO(w, h int, format texFormat) (*fbo, error) {
 	target := &fbo{width: w, height: h}
 	gl.GenTextures(1, &target.tex)
 	gl.BindTexture(gl.TEXTURE_2D, target.tex)
-	gl.TexImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, glSize(w), glSize(h), 0, gl.RGBA, gl.UNSIGNED_BYTE, nil)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+	gl.TexImage2D(gl.TEXTURE_2D, 0, format.internal, glSize(w), glSize(h), 0, gl.RGBA, format.pixelType, nil)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, format.filter)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, format.filter)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 	gl.BindTexture(gl.TEXTURE_2D, 0)
 
 	gl.GenFramebuffers(1, &target.id)

@@ -112,7 +112,7 @@ bench dur="3s" *args:
     go run . -bench {{dur}} -size 1024x1024 {{args}}
     go run . -bench {{dur}} -size 2048x2048 {{args}}
 
-# Single-file Shadertoy export, verified by rendering it back
+# Shadertoy export (multipass: plus out/shadertoy_bufferA.glsl), verified by rendering it back
 bundle *args:
     go run . -bundle out/shadertoy.glsl {{args}}
     go run . -shader out/shadertoy.glsl -shot out/shadertoy_check.png -time 15 -size {{size}}

@@ -158,36 +158,68 @@ func run(opt *options) error {
 	defer glfw.Terminate()
 	defer window.Destroy()
 
-	screen := newQuad()
-	defer screen.delete()
+	rend := newRenderer()
+	defer rend.delete()
 
 	switch {
 	case opt.shot != "":
-		return runShot(opt, screen)
+		return runShot(opt, rend)
 	case opt.bench > 0:
-		return runBench(opt, screen)
+		return runBench(opt, rend)
 	default:
-		runWindow(opt, window, screen)
-		return nil
+		return runWindow(opt, window, rend)
 	}
 }
 
-// writeBundle writes the single-file Shadertoy export to opt.bundle.
+// writeBundle writes the Shadertoy export: opt.bundle for the Image pass and,
+// for multipass shaders, OUT_bufferA.glsl next to it for Buffer A. The Image
+// file names the Buffer A file in a `// #bufferA "..."` comment, so the
+// runner can render the bundle back with -shader while Shadertoy ignores it.
 func writeBundle(opt *options) error {
-	body, err := loadShader(opt.shader)
+	srcs, err := loadPasses(opt.shader)
 	if err != nil {
 		return err
 	}
 
-	err = writeOutput(opt.bundle, func(w io.Writer) error {
-		_, err := io.WriteString(w, bundle(body, opt.defines, opt.shader))
+	header := fmt.Sprintf("// Bundled from %s by imperfection runner. Paste into Shadertoy's Image tab.\n", opt.shader)
+
+	if srcs.bufferA != nil {
+		bufPath := bufferBundlePath(opt.bundle)
+		bufName := filepath.Base(bufPath)
+		bufHeader := fmt.Sprintf("// Bundled from %s by imperfection runner. Paste into Shadertoy's Buffer A tab.\n",
+			srcs.bufferA.files[0])
+
+		err = writeText(bufPath, bundle(srcs.bufferA, opt.defines, bufHeader))
+		if err != nil {
+			return err
+		}
+
+		header += "// Multipass: paste " + bufName + " into the Buffer A tab, then set this tab's\n" +
+			"// iChannel0 to Buffer A with filter \"linear\" and wrap \"clamp\".\n" +
+			"// The next line is for the imperfection runner (-shader); Shadertoy ignores it.\n" +
+			"// #bufferA \"" + bufName + "\"\n"
+	}
+
+	return writeText(opt.bundle, bundle(srcs.image, opt.defines, header))
+}
+
+// bufferBundlePath turns "out/shadertoy.glsl" into "out/shadertoy_bufferA.glsl".
+func bufferBundlePath(imagePath string) string {
+	ext := filepath.Ext(imagePath)
+	return strings.TrimSuffix(imagePath, ext) + "_bufferA" + ext
+}
+
+// writeText writes text to path and reports it.
+func writeText(path, text string) error {
+	err := writeOutput(path, func(w io.Writer) error {
+		_, err := io.WriteString(w, text)
 		return err
 	})
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("wrote", opt.bundle)
+	fmt.Println("wrote", path)
 
 	return nil
 }
@@ -226,17 +258,6 @@ func initGL(opt *options, visible bool) (*glfw.Window, error) {
 	return window, nil
 }
 
-func loadProgram(opt *options) (*program, *source, error) {
-	body, err := loadShader(opt.shader)
-	if err != nil {
-		return nil, body, err
-	}
-
-	prog, err := buildProgram(body, opt.defines)
-
-	return prog, body, err
-}
-
 // fixedUniforms returns deterministic inputs for offscreen frames at time t.
 func fixedUniforms(opt *options, t float64) frameUniforms {
 	return frameUniforms{
@@ -247,14 +268,14 @@ func fixedUniforms(opt *options, t float64) frameUniforms {
 	}
 }
 
-func runShot(opt *options, screen *quad) error {
-	prog, _, err := loadProgram(opt)
+func runShot(opt *options, rend *renderer) error {
+	pipe, _, err := loadPipeline(opt)
 	if err != nil {
 		return err
 	}
-	defer prog.delete()
+	defer pipe.delete()
 
-	target, err := newFBO(opt.width, opt.height)
+	target, err := newFBO(opt.width, opt.height, shotFormat)
 	if err != nil {
 		return err
 	}
@@ -271,10 +292,14 @@ func runShot(opt *options, screen *quad) error {
 	for i, t := range opt.times {
 		path := shotPath(opt, i, t)
 
-		screen.draw(prog, fixedUniforms(opt, t))
+		err := rend.draw(pipe, fixedUniforms(opt, t), target.id)
+		if err != nil {
+			return err
+		}
+
 		gl.Finish()
 
-		err := writeShot(path, readPixels(opt.width, opt.height), ref, opt.frames == 0)
+		err = writeShot(path, readPixels(opt.width, opt.height), ref, opt.frames == 0)
 		if err != nil {
 			return err
 		}
@@ -314,31 +339,48 @@ func writeShot(path string, img *image.RGBA, ref image.Image, verbose bool) erro
 	return nil
 }
 
-func runBench(opt *options, screen *quad) error {
-	prog, _, err := loadProgram(opt)
+// runBench renders offscreen for opt.bench and prints the mean frame time.
+// Multipass shaders also get the GPU time of each pass (timer queries).
+func runBench(opt *options, rend *renderer) error {
+	pipe, _, err := loadPipeline(opt)
 	if err != nil {
 		return err
 	}
-	defer prog.delete()
+	defer pipe.delete()
 
-	target, err := newFBO(opt.width, opt.height)
+	target, err := newFBO(opt.width, opt.height, shotFormat)
 	if err != nil {
 		return err
 	}
 	defer target.delete()
 
 	for i := range 10 { // warm-up: shader compilation is often lazy
-		screen.draw(prog, fixedUniforms(opt, float64(i)/60))
+		err := rend.draw(pipe, fixedUniforms(opt, float64(i)/60), target.id)
+		if err != nil {
+			return err
+		}
 	}
 
 	gl.Finish()
+
+	if pipe.bufferA != nil {
+		rend.timer = newPassTimer()
+	}
 
 	start := time.Now()
 	frames := 0
 
 	for time.Since(start) < opt.bench {
-		screen.draw(prog, fixedUniforms(opt, time.Since(start).Seconds()))
+		err := rend.draw(pipe, fixedUniforms(opt, time.Since(start).Seconds()), target.id)
+		if err != nil {
+			return err
+		}
+
 		gl.Finish()
+
+		if rend.timer != nil {
+			rend.timer.collect()
+		}
 
 		frames++
 	}
@@ -347,6 +389,10 @@ func runBench(opt *options, screen *quad) error {
 	ms := el.Seconds() * 1000 / float64(frames)
 	fmt.Printf("%dx%d: %d frames in %.2fs, %.2f ms/frame, %.1f fps\n",
 		opt.width, opt.height, frames, el.Seconds(), ms, 1000/ms)
+
+	if rend.timer != nil {
+		fmt.Println("  " + rend.timer.summary())
+	}
 
 	return nil
 }
@@ -426,15 +472,11 @@ func (in *windowInput) attach(window *glfw.Window) {
 	})
 }
 
-func runWindow(opt *options, window *glfw.Window, screen *quad) {
+func runWindow(opt *options, window *glfw.Window, rend *renderer) error {
 	glfw.SwapInterval(1)
 
-	prog, body, err := loadProgram(opt)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-	}
-
-	watch := newWatcher(body.files)
+	live := newLiveShader(opt)
+	defer live.delete()
 
 	var (
 		input     windowInput
@@ -459,11 +501,17 @@ func runWindow(opt *options, window *glfw.Window, screen *quad) {
 
 		if now-lastPoll >= 0.25 {
 			lastPoll = now
-			prog = reloadProgram(opt, watch, prog)
+
+			live.reload()
 		}
 
 		fbWidth, fbHeight := window.GetFramebufferSize()
-		screen.draw(prog, liveUniforms(fbWidth, fbHeight, simTime, delta, frame, &input.mouse))
+
+		err := rend.draw(live.pipe, liveUniforms(fbWidth, fbHeight, simTime, delta, frame, &input.mouse), 0)
+		if err != nil {
+			return err
+		}
+
 		input.mouse.clicked = false
 		frame++
 
@@ -483,31 +531,50 @@ func runWindow(opt *options, window *glfw.Window, screen *quad) {
 		glfw.PollEvents()
 	}
 
-	prog.delete()
+	return nil
 }
 
-// reloadProgram rebuilds the program when a watched file changed. If the new
-// version fails to build, the error is logged and prog stays in use.
-func reloadProgram(opt *options, watch *watcher, prog *program) *program {
-	if !watch.changed() {
-		return prog
+// liveShader is the hot-reloaded pipeline of window mode. It watches the
+// files of every pass.
+type liveShader struct {
+	opt   *options
+	pipe  *pipeline // nil until the first successful build
+	watch *watcher
+}
+
+func newLiveShader(opt *options) *liveShader {
+	pipe, files, err := loadPipeline(opt)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 	}
 
-	next, body, err := loadProgram(opt)
-	watch.add(body.files)
+	return &liveShader{opt: opt, pipe: pipe, watch: newWatcher(files)}
+}
+
+// reload rebuilds all passes when a watched file (of any pass) changed. If
+// any pass fails to build, the error is logged and the previous pipeline, all
+// of its passes, stays in use.
+func (l *liveShader) reload() {
+	if !l.watch.changed() {
+		return
+	}
+
+	next, files, err := loadPipeline(l.opt)
+	l.watch.add(files)
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[%s] reload failed, keeping previous program:\n%v\n", time.Now().Format("15:04:05"), err)
 
-		return prog
+		return
 	}
 
-	prog.delete()
+	l.pipe.delete()
+	l.pipe = next
 
-	fmt.Fprintf(os.Stderr, "[%s] reloaded %s\n", time.Now().Format("15:04:05"), opt.shader)
-
-	return next
+	fmt.Fprintf(os.Stderr, "[%s] reloaded %s\n", time.Now().Format("15:04:05"), l.opt.shader)
 }
+
+func (l *liveShader) delete() { l.pipe.delete() }
 
 // liveUniforms returns the inputs for an interactive frame of the given size.
 func liveUniforms(width, height int, simTime, delta float64, frame int32, mouse *mouseState) frameUniforms {

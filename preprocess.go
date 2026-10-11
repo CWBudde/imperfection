@@ -18,9 +18,11 @@ type origin struct {
 // source is a flattened shader: every line remembers its origin, so compiler
 // logs can be remapped from "0:123" to "shaders/water.glsl:17".
 type source struct {
-	lines   []string
-	origins []origin
-	files   []string // every file that was read, in include order (for hot reload)
+	lines    []string
+	origins  []origin
+	files    []string // every file that was read, in include order (for hot reload)
+	bufferA  string   // #bufferA path relative to the root, empty for single pass
+	bufferAt string   // "file:line" of the #bufferA directive, for errors
 }
 
 func (s *source) String() string {
@@ -45,28 +47,65 @@ func (s *source) append(o *source) {
 	s.files = append(s.files, o.files...)
 }
 
-var includeRe = regexp.MustCompile(`^\s*#\s*include\s+"([^"]+)"`)
+var (
+	includeRe = regexp.MustCompile(`^\s*#\s*include\s+"([^"]+)"`)
+	// bufferRe matches `#bufferA "file"` and the commented form
+	// `// #bufferA "file"` that bundles carry (Shadertoy ignores the comment).
+	bufferRe = regexp.MustCompile(`^\s*(?://\s*)?#\s*bufferA\s+"([^"]+)"`)
+)
 
-// loadShader reads path and recursively inlines `#include "file"` directives.
-// Include paths are relative to the including file and must stay inside the
-// directory of the main shader; files are read through an os.Root, so an
-// include cannot escape it (neither via ".." nor via symlinks). Each file is
-// included at most once (pragma-once semantics), which also makes include
-// cycles harmless. On error the returned source still lists the files read so
-// far, so the caller can keep watching them for changes.
-func loadShader(path string) (*source, error) {
-	src := &source{}
+// passSources is the preprocessed source of every pass of a shader.
+type passSources struct {
+	image   *source
+	bufferA *source // nil for single-pass shaders
+}
+
+// files lists every file read for any pass.
+func (p *passSources) files() []string {
+	files := p.image.files
+	if p.bufferA != nil {
+		files = append(files[:len(files):len(files)], p.bufferA.files...)
+	}
+
+	return files
+}
+
+// loadPasses reads the Image shader at path and, if it declares
+// `#bufferA "file"`, the Buffer A shader, each with its includes inlined.
+//
+// Include and #bufferA paths are relative to the file that names them and
+// must stay inside the directory of the Image shader; files are read through
+// an os.Root, so they cannot escape it (neither via ".." nor via symlinks).
+// Within a pass each file is included at most once (pragma-once semantics),
+// which also makes include cycles harmless. On error the result still lists
+// the files read so far, so the caller can keep watching them for changes.
+func loadPasses(path string) (*passSources, error) {
+	srcs := &passSources{image: &source{}}
 	dir, name := filepath.Split(path)
 
 	root, err := os.OpenRoot(filepath.Clean(dir))
 	if err != nil {
-		return src, err
+		return srcs, err
 	}
 	defer root.Close()
 
-	err = src.include(root, dir, name, map[string]bool{})
+	err = srcs.image.include(root, dir, name, map[string]bool{})
+	if err != nil || srcs.image.bufferA == "" {
+		return srcs, err
+	}
 
-	return src, err
+	srcs.bufferA = &source{}
+
+	err = srcs.bufferA.include(root, dir, srcs.image.bufferA, map[string]bool{})
+	if err != nil {
+		return srcs, fmt.Errorf("%s: #bufferA: %w", srcs.image.bufferAt, err)
+	}
+
+	if srcs.bufferA.bufferA != "" {
+		return srcs, fmt.Errorf("%s: Buffer A cannot declare #bufferA itself", srcs.bufferA.bufferAt)
+	}
+
+	return srcs, nil
 }
 
 // include inlines the file rel (relative to root, whose path is dir).
@@ -88,6 +127,17 @@ func (s *source) include(root *os.Root, dir, rel string, seen map[string]bool) e
 
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
 	for i, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+		if match := bufferRe.FindStringSubmatch(line); match != nil {
+			if s.bufferA != "" {
+				return fmt.Errorf("%s:%d: second #bufferA directive", path, i+1)
+			}
+
+			s.bufferA = filepath.Join(filepath.Dir(rel), match[1])
+			s.bufferAt = fmt.Sprintf("%s:%d", path, i+1)
+
+			continue
+		}
+
 		match := includeRe.FindStringSubmatch(line)
 		if match == nil {
 			s.add(line, origin{file: path, line: i + 1})
@@ -185,12 +235,12 @@ func (s *source) remapLog(log string) string {
 	return strings.TrimRight(log, "\x00\n ")
 }
 
-// bundle produces a single self-contained Shadertoy-pasteable shader: the
-// defines as #define lines on top, followed by all includes inlined.
-func bundle(body *source, defs defineList, shaderPath string) string {
+// bundle produces one self-contained Shadertoy-pasteable pass: the header,
+// the defines as #define lines, then the pass with all includes inlined.
+func bundle(body *source, defs defineList, header string) string {
 	var buf strings.Builder
 
-	fmt.Fprintf(&buf, "// Bundled from %s by imperfection runner. Paste into Shadertoy's Image tab.\n", shaderPath)
+	buf.WriteString(header)
 
 	for _, d := range defs {
 		buf.WriteString(d.String())
