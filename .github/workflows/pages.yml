@@ -1,4 +1,4 @@
-# Publishes the WebGL2 player (web/) with the bundled shaders (Image + Buffer A) to GitHub Pages.
+# Publishes the WebGL2 player (web/) with the bundled shaders (Image + Buffer A, and the single-pass lite version) to GitHub Pages.
 name: Pages
 
 on:
@@ -35,6 +35,7 @@ jobs:
         run: |
           mkdir -p _site
           go run . -bundle _site/shadertoy.glsl
+          go run . -shader shaders/lite.glsl -bundle _site/lite.glsl
           cp web/* _site/
 
       - uses: actions/upload-pages-artifact@v4

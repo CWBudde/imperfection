@@ -5,7 +5,9 @@ the left breaks up into rectangular brush blocks and vertical streaks, then fade
 into dark blue on the right.
 
 **▶ [Try it online](https://cwbudde.github.io/imperfection/)**: runs in any
-browser with WebGL2 (`Space` pauses, `F` toggles fullscreen).
+browser with WebGL2 (`Space` pauses, `F` toggles fullscreen). On weaker GPUs, try the
+**[lite version](https://cwbudde.github.io/imperfection/?lite)**: a single pass,
+about three times cheaper.
 
 The scene is written in Shadertoy form (`mainImage`) and split into include files.
 A small Go runner (go-gl 4.1 core + GLFW 3.3, taken from `the-other-side`) renders it
@@ -27,6 +29,7 @@ paste into Shadertoy.
 | `shaders/grade.glsl`                                                 | L4: glow over the yellow core, hue-split grade (Image)                                           |
 | `shaders/anim.glsl`                                                  | the seamless loop clock shared by all layers                                                     |
 | `shaders/common.glsl`                                                | constants, hashes, noise, colour helpers                                                         |
+| `shaders/lite.glsl`                                                  | the lite version: everything in one pass, no buffer, ~3x cheaper                                 |
 | `shaders/rival_{a,b,c}.glsl`                                         | the three competing prototypes (record, still renderable)                                        |
 | `docs/analysis.md`                                                   | analysis of the reference, the rivals, the verdict                                               |
 | `docs/animation.md`                                                  | the animation concept and rules                                                                  |
@@ -44,6 +47,20 @@ needs per pixel. The Image pass (`main.glsl`) smears that paint along each pixel
 grain where it is wet (W), then draws the dry accents (L3) and the light (L4) on
 top. Debug defines: `SHOW_FIELD`, `NO_BLOCKS`, `BLOCK_DEBUG`, `WET=0`,
 `AA_EDGE=0`, `WET_LIC=1`, `SHOW_WET` (see the header of `main.glsl`).
+
+`lite.glsl` paints the same picture in a single pass, at about a third of the cost
+(1024x1024 on an Iris Xe: 4.4 instead of 14 ms/frame). It uses the same colour field,
+directions and loop, but with less texture. Most of its savings come from the field:
+`baseField` loops over its 83 colour anchors with a dynamic index into const arrays,
+which costs ~7 ms per lookup at 1024x1024. `liteField` reads them unrolled, with
+literal indices, in ~1 ms and gives the same colours. Each pixel needs exactly one
+field lookup: a grid block, or the smeared background. There is no wet buffer pass.
+In wet zones, the smear slides the lookup point toward the neighbouring segment near
+a segment end, and the hairline offset becomes a smooth noise across the grain. The
+lite version has one block grid instead of four, keeps the authored rectangles, the
+wedge, the soot, the glow and the grade, and drops drips, ink scratches and flecks.
+Render it with `-shader shaders/lite.glsl` (`-D ANIM=0`, `-D WET=0` and
+`-D NO_BLOCKS=1` work as usual).
 
 `main.glsl` grew out of a competition between three approaches: a rectangle
 collage (A), a smear field (B) and stroke splatting (C). Each was prototyped as
@@ -129,27 +146,31 @@ Shadertoy treats that line as a comment, but the runner reads it, so
 `-shader OUT.glsl` renders the bundle back with both passes. `just bundle` uses
 that as its check. Keep the two files next to each other.
 
+The lite version is a single pass, so `just bundle-lite` writes one file,
+`out/shadertoy_lite.glsl`, for the Image tab. No Buffer A or channel setup is needed.
+
 ### justfile recipes
 
-| Recipe                                                 | Does                                                                      |
-| ------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `just run [args]`                                      | window mode with hot reload (also the default recipe)                     |
-| `just shot [times] [args]`                             | offscreen shots into `out/`                                               |
-| `just compare [REF] [times] [args]`                    | shots plus `_cmp` montages against `REF` (default: the reference image)   |
-| `just clip [start] [dur] [fps] [args]`                 | frame sequence into `out/clip/`, encoded as `out/clip.mp4` (needs ffmpeg) |
-| `just sheet [dir] [every] [grid] [crop] [width] [out]` | contact sheet of every n-th frame, for judging motion                     |
-| `just bench [dur] [args]`                              | benchmark at 1024x1024 and 2048x2048                                      |
-| `just bundle [args]`                                   | write `out/shadertoy.glsl` (+ `_bufferA`) and render it back as a check   |
-| `just web [port] [args]`                               | bundle into `out/web` with the WebGL2 player and serve it on `:8000`      |
-| `just stat [img]`                                      | `imgstat analyze` (default: the reference)                                |
-| `just stat-ref`                                        | regenerate `docs/reference-stats.txt`                                     |
-| `just score [renders...]`                              | `imgstat score` against the reference (default: `out/shot.png`)           |
-| `just diff [render] [out]`                             | `imgstat diff` montage (default: `out/shot.png` into `out/diff.png`)      |
-| `just setup-deps`                                      | install treefmt, prettier, gofumpt, gci, shfmt, golangci-lint             |
-| `just fmt`                                             | format with treefmt (`treefmt.toml`; GLSL is not formatted)               |
-| `just lint` / `just lint-fix`                          | golangci-lint with `.golangci.toml`                                       |
-| `just fix`                                             | `lint-fix`, then `fmt`                                                    |
-| `just check`                                           | formatted, lint, `go mod tidy -diff`, build and vet                       |
+| Recipe                                                 | Does                                                                        |
+| ------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `just run [args]`                                      | window mode with hot reload (also the default recipe)                       |
+| `just shot [times] [args]`                             | offscreen shots into `out/`                                                 |
+| `just compare [REF] [times] [args]`                    | shots plus `_cmp` montages against `REF` (default: the reference image)     |
+| `just clip [start] [dur] [fps] [args]`                 | frame sequence into `out/clip/`, encoded as `out/clip.mp4` (needs ffmpeg)   |
+| `just sheet [dir] [every] [grid] [crop] [width] [out]` | contact sheet of every n-th frame, for judging motion                       |
+| `just bench [dur] [args]`                              | benchmark at 1024x1024 and 2048x2048 (lite: `-shader shaders/lite.glsl`)    |
+| `just bundle [args]`                                   | write `out/shadertoy.glsl` (+ `_bufferA`) and render it back as a check     |
+| `just bundle-lite [args]`                              | write `out/shadertoy_lite.glsl` (lite version, one file) and render it back |
+| `just web [port] [args]`                               | bundle into `out/web` with the WebGL2 player and serve it on `:8000`        |
+| `just stat [img]`                                      | `imgstat analyze` (default: the reference)                                  |
+| `just stat-ref`                                        | regenerate `docs/reference-stats.txt`                                       |
+| `just score [renders...]`                              | `imgstat score` against the reference (default: `out/shot.png`)             |
+| `just diff [render] [out]`                             | `imgstat diff` montage (default: `out/shot.png` into `out/diff.png`)        |
+| `just setup-deps`                                      | install treefmt, prettier, gofumpt, gci, shfmt, golangci-lint               |
+| `just fmt`                                             | format with treefmt (`treefmt.toml`; GLSL is not formatted)                 |
+| `just lint` / `just lint-fix`                          | golangci-lint with `.golangci.toml`                                         |
+| `just fix`                                             | `lint-fix`, then `fmt`                                                      |
+| `just check`                                           | formatted, lint, `go mod tidy -diff`, build and vet                         |
 
 ## Web version
 
@@ -160,8 +181,10 @@ texture, then the Image pass). It needs `EXT_color_buffer_float`, because the Bu
 alpha packs integers that an 8-bit target would destroy. The canvas is the largest
 centred square that fits the window. It renders at most 1080 lines and lowers the
 resolution further when frames take longer than about 45 ms. `?scale=0.5` fixes the
-render scale, `?t=20` sets the start time. Keys: `Space` pauses, `F` or a double click
-toggles fullscreen. `just web` builds and serves the same site locally.
+render scale, `?t=20` sets the start time. `?lite` runs the single-pass lite version
+(`lite.glsl`), which needs no float render target; the link in the corner switches
+between both versions. Keys: `Space` pauses, `F` or a double click toggles fullscreen.
+`just web` builds and serves the same site locally.
 
 ## Image statistics: `cmd/imgstat`
 

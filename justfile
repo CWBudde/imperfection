@@ -107,7 +107,7 @@ sheet dir="out/clip" every="15" grid="4x4" crop="iw:ih:0:0" width="480" out="out
     ffmpeg -loglevel error -y -i {{dir}}/f_%05d.png -vf "select='not(mod(n\,{{every}}))',crop={{crop}},scale={{width}}:-1,tile={{grid}}:padding=4" -frames:v 1 {{out}}
     @echo "wrote {{out}}"
 
-# Benchmark at 1024x1024 and 2048x2048
+# Benchmark at 1024x1024 and 2048x2048 (the lite version: `just bench 3s -shader shaders/lite.glsl`)
 bench dur="3s" *args:
     go run . -bench {{dur}} -size 1024x1024 {{args}}
     go run . -bench {{dur}} -size 2048x2048 {{args}}
@@ -117,10 +117,16 @@ bundle *args:
     go run . -bundle out/shadertoy.glsl {{args}}
     go run . -shader out/shadertoy.glsl -shot out/shadertoy_check.png -time 15 -size {{size}}
 
+# Shadertoy export of the single-pass lite version (one file, Image tab only), verified by rendering it back
+bundle-lite *args:
+    go run . -shader shaders/lite.glsl -bundle out/shadertoy_lite.glsl {{args}}
+    go run . -shader out/shadertoy_lite.glsl -shot out/shadertoy_lite_check.png -time 15 -size {{size}}
+
 # Static WebGL2 site in out/web (what the Pages workflow publishes), served on :8000
 web port="8000" *args:
     rm -rf out/web && mkdir -p out/web
     go run . -bundle out/web/shadertoy.glsl {{args}}
+    go run . -shader shaders/lite.glsl -bundle out/web/lite.glsl {{args}}
     cp web/* out/web/
     python3 -m http.server -d out/web {{port}}
 

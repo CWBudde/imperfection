@@ -3,13 +3,15 @@
 // Mirrors the Go runner: shadertoy.glsl is the Image pass. If it names a
 // Buffer A file in a `// #bufferA "..."` comment, that pass renders first into
 // a half-float texture (filter linear, wrap clamp, no mipmaps) that the Image
-// pass reads on iChannel0. Both files come from `go run . -bundle`.
+// pass reads on iChannel0. Both files come from `go run . -bundle`. With ?lite
+// the player runs lite.glsl instead, the single-pass version
+// (shaders/lite.glsl), which is about three times cheaper.
 //
 // Buffer A packs integers up to 1023 into its alpha, which only a float target
-// holds exactly, so the player needs EXT_color_buffer_float.
+// holds exactly, so the full version needs EXT_color_buffer_float.
 //
-// URL parameters: ?scale=0.75 fixes the render scale (default: adaptive, at
-// most 1080 lines), ?t=20 starts at iTime 20.
+// URL parameters: ?lite runs the lite version, ?scale=0.75 fixes the render
+// scale (default: adaptive, at most 1080 lines), ?t=20 starts at iTime 20.
 //
 // Adaptive scale: the median frame interval over a window of frames decides,
 // so single hitches (GC, tab switches) do not count. Vsync quantises the
@@ -41,11 +43,15 @@ const gl = canvas.getContext("webgl2", {
 });
 if (!gl) fail("WebGL2 is not available in this browser.");
 
-if (!gl.getExtension("EXT_color_buffer_float")) {
-  fail(
-    "This browser cannot render to float textures (EXT_color_buffer_float).",
-  );
-}
+// The link in the credits switches between the full and the lite version and
+// keeps the other parameters.
+const lite = params.has("lite");
+const other = new URLSearchParams(params);
+if (lite) other.delete("lite");
+else other.set("lite", "");
+const mode = document.getElementById("mode");
+mode.textContent = lite ? "full version" : "lite version";
+mode.href = "?" + other.toString().replace(/=(&|$)/g, "$1");
 
 const vertexSource = `#version 300 es
 void main() {
@@ -136,8 +142,14 @@ async function fetchText(url) {
   return res.text();
 }
 
-const imageSrc = await fetchText("shadertoy.glsl");
+const imageSrc = await fetchText(lite ? "lite.glsl" : "shadertoy.glsl");
 const bufferName = imageSrc.match(/^\s*\/\/\s*#bufferA\s+"([^"]+)"/m)?.[1];
+if (bufferName && !gl.getExtension("EXT_color_buffer_float")) {
+  fail(
+    "This browser cannot render to float textures (EXT_color_buffer_float).\n" +
+      "Try the lite version (?lite), which needs no buffer.",
+  );
+}
 const bufA = bufferName
   ? buildPass(await fetchText(bufferName), bufferPostfix, bufferName)
   : null;
